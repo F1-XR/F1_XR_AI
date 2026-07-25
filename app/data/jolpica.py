@@ -25,11 +25,15 @@ async def get_driver_career(driver_id: str) -> dict | None:
         return table[0] if table else None
 
 
-async def get_driver_champrionships(driver_id: str) -> int:
-    """통산 월드 챔피언 횟수(우승 시즌 수)."""
-    url = f"{settings.jolpica_base}/drivers/{driver_id}/driverStandings/1.json"
+async def get_driver_wins(driver_id: str) -> int:
+    """통산 우승(1위 완주) 횟수. results/1 의 total 로 단일 호출로 얻는다.
+
+    참고: 통산 '월드 챔피언 수'는 Jolpica가 driverStandings에 season_year를
+    필수로 요구해 시즌별 순회가 필요하므로(호출량 큼) 여기서는 다루지 않는다.
+    """
+    url = f"{settings.jolpica_base}/drivers/{driver_id}/results/1.json"
     async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
-        r = await client.get(url)
+        r = await client.get(url, params={"limit": 1})
         r.raise_for_status()
-        lists = r.json().get("MRData", {}).get("StandingsTable", {}).get("StandingsLists", [])
-        return len(lists)
+        total = r.json().get("MRData", {}).get("total")
+        return int(total) if total is not None else 0

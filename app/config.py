@@ -16,8 +16,8 @@ class Settings(BaseSettings):
     # F1_XR_Server (리플레이/데이터 백엔드) — 있으면 여기 경유, 없으면 OpenF1 직접
     f1_server_url: str = ""
 
-    # 기본 세션 (데모용 과거 경기 리플레이)
-    default_session_key: int = 9839
+    # 기본 세션 (데모용 과거 경기 리플레이) — 모나코 2024 Race
+    default_session_key: int = 9523
 
 
 settings = Settings()

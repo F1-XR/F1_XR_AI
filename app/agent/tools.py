@@ -16,6 +16,7 @@ from pathlib import Path
 from langchain_core.tools import tool
 
 from ..data import openf1, jolpica
+from ..data.drivers import jolpica_id
 from .commands import emit_command
 from .context import current_session, current_time, set_session
 
@@ -71,14 +72,18 @@ async def get_driver_info(driver_number: int) -> dict:
         "country": driver.get("country_code"),
         "headshot_url": driver.get("headshot_url"),
     }
-    # 커리어(통산 기록)는 Jolpica에서 별도 조회 — 실패해도 기본 정보는 반환
-    last = (driver.get("last_name") or "").lower()
-    if last:
+    # 커리어(통산 기록)는 Jolpica에서 별도 조회 — 실패해도 기본 정보는 반환.
+    # 번호→Jolpica id 매핑(drivers.py)을 우선 쓰고, 없으면 성(last_name)으로 근사.
+    jid = jolpica_id(driver_number, driver.get("last_name"))
+    if jid:
         try:
-            career = await jolpica.get_driver_career(last)
+            career = await jolpica.get_driver_career(jid)
             if career:
                 info["date_of_birth"] = career.get("dateOfBirth")
                 info["nationality"] = career.get("nationality")
+            wins = await jolpica.get_driver_wins(jid)
+            if wins:
+                info["career_wins"] = wins
         except Exception:
             pass
     return info
@@ -87,26 +92,49 @@ async def get_driver_info(driver_number: int) -> dict:
 @tool
 async def get_race_status() -> dict:
     """현재 리플레이 시점의 경기 상황(깃발/세이프티카/순위)을 조회한다.
-    "지금 무슨 상황이야?", "누가 1등이야?" 같은 질문에 사용한다."""
+    "지금 무슨 상황이야?", "누가 1등이야?" 같은 질문에 사용한다.
+    리플레이 현재 시각(at_time) 이하의 데이터만 보므로 아직 안 지난 결과는 스포일러하지 않는다."""
     session = current_session()
+    cutoff = current_time()   # 리플레이 현재 시각(ISO). None이면 전체(=최신).
     rc = await openf1.get_race_control(session)
     positions = await openf1.get_positions(session)
 
-    # 가장 최근 깃발/이벤트
+    def _before(rows: list[dict]) -> list[dict]:
+        """cutoff 이하 시점의 기록만 남긴다(cutoff 없으면 전체)."""
+        if not cutoff:
+            return rows
+        return [r for r in rows if not r.get("date") or r["date"] <= cutoff]
+
+    # 가장 최근 깃발/세이프티카 (cutoff 이하 이벤트 중 마지막)
     latest_flag = None
-    for ev in rc:
+    safety_car = False
+    for ev in _before(rc):
         if ev.get("flag"):
             latest_flag = {"flag": ev.get("flag"), "message": ev.get("message")}
-    # 현재 상위 순위 (마지막 기록 기준 간단 요약)
-    top = {}
-    for p in positions:
-        top[p.get("position")] = p.get("driver_number")
-    leaders = [top[k] for k in sorted(k for k in top if k)][:5]
+        cat, msg = ev.get("category"), (ev.get("message") or "").upper()
+        if cat == "SafetyCar":
+            # "DEPLOYED/IN THIS LAP" → 투입, "IN THIS LAP"에 ENDING 류면 해제
+            safety_car = "ENDING" not in msg and "IN THIS LAP" not in msg
+
+    # 현재 순위: 드라이버별 cutoff 이하 '가장 최근' position 기록으로 산출
+    latest: dict[int, tuple] = {}   # driver_number -> (date, position)
+    for p in _before(positions):
+        dn, pos, d = p.get("driver_number"), p.get("position"), p.get("date")
+        if dn is None or pos is None:
+            continue
+        prev = latest.get(dn)
+        if prev is None or (d or "") >= (prev[0] or ""):
+            latest[dn] = (d, pos)
+    standings = [
+        {"position": pos, "driver_number": dn}
+        for dn, (d, pos) in sorted(latest.items(), key=lambda kv: kv[1][1])
+    ]
 
     return {
         "latest_flag": latest_flag,
-        "leaders_driver_numbers": leaders,
-        "at_time": current_time(),
+        "safety_car": safety_car,
+        "standings": standings[:5],
+        "at_time": cutoff,
     }
 
 
