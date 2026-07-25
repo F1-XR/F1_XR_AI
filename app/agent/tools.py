@@ -15,8 +15,7 @@ from pathlib import Path
 
 from langchain_core.tools import tool
 
-from ..data import openf1, jolpica
-from ..data.drivers import jolpica_id
+from ..data import openf1
 from .commands import emit_command
 from .context import current_session, current_time, set_session
 
@@ -72,20 +71,18 @@ async def get_driver_info(driver_number: int) -> dict:
         "country": driver.get("country_code"),
         "headshot_url": driver.get("headshot_url"),
     }
-    # 커리어(통산 기록)는 Jolpica에서 별도 조회 — 실패해도 기본 정보는 반환.
-    # 번호→Jolpica id 매핑(drivers.py)을 우선 쓰고, 없으면 성(last_name)으로 근사.
-    jid = jolpica_id(driver_number, driver.get("last_name"))
-    if jid:
-        try:
-            career = await jolpica.get_driver_career(jid)
-            if career:
-                info["date_of_birth"] = career.get("dateOfBirth")
-                info["nationality"] = career.get("nationality")
-            wins = await jolpica.get_driver_wins(jid)
-            if wins:
-                info["career_wins"] = wins
-        except Exception:
-            pass
+    # 커리어(통산 기록)는 데이터 서버가 Jolpica를 캐시해 제공 — 실패해도 기본 정보는 반환.
+    try:
+        career = await openf1.get_career(session, driver_number)
+        if career:
+            if career.get("dateOfBirth"):
+                info["date_of_birth"] = career["dateOfBirth"]
+            if career.get("nationality"):
+                info["nationality"] = career["nationality"]
+            if career.get("wins"):
+                info["career_wins"] = career["wins"]
+    except Exception:
+        pass
     return info
 
 

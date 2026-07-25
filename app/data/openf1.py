@@ -80,6 +80,22 @@ async def get_laps(session_key: int, driver_number: int | None = None) -> list[d
     return await _get_resource(session_key, "laps", driver_number)
 
 
+async def get_career(session_key: int, driver_number: int) -> dict:
+    """선수 통산 기록(생년월일·국적·통산우승). 데이터 서버가 Jolpica를 캐시해 제공한다.
+
+    반환: {jolpicaId, dateOfBirth, nationality, wins} (없으면 빈 dict).
+    서버 경유 전용 — f1_server_url 이 없으면(직결 폴백) 커리어는 생략한다.
+    """
+    base = _server_base()
+    if not base:
+        return {}
+    url = f"{base}/f1/{session_key}/career/{driver_number}"
+    async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
+        r = await client.get(url)
+        r.raise_for_status()
+        return r.json()
+
+
 async def find_sessions(
     year: int | None = None,
     country: str | None = None,

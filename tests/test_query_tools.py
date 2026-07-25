@@ -3,7 +3,7 @@
 OpenF1/Jolpica 호출을 monkeypatch로 가짜 응답으로 바꿔치기해, 도구가 데이터를
 '받았을 때 제대로 가공하는지'만 본다. 네트워크·서버·키 전부 불필요.
 """
-from app.data import openf1, jolpica
+from app.data import openf1
 from app.agent.context import set_context, set_session, current_session
 from app.agent.tools import get_driver_info, get_race_status, explain_why, find_session
 
@@ -23,9 +23,9 @@ async def test_driver_info_merges_career(monkeypatch):
         "name_acronym": "HAM", "team_name": "Mercedes", "country_code": "GBR",
         "headshot_url": "http://x/h.png",
     }))
-    monkeypatch.setattr(jolpica, "get_driver_career",
-                        _aret({"dateOfBirth": "1985-01-07", "nationality": "British"}))
-    monkeypatch.setattr(jolpica, "get_driver_wins", _aret(106))
+    monkeypatch.setattr(openf1, "get_career", _aret({
+        "dateOfBirth": "1985-01-07", "nationality": "British", "wins": 106,
+    }))
     set_session(9523)
 
     out = await get_driver_info.ainvoke({"driver_number": 44})
@@ -49,10 +49,9 @@ async def test_driver_info_survives_career_failure(monkeypatch):
     }))
 
     async def boom(*a, **k):
-        raise RuntimeError("jolpica down")
+        raise RuntimeError("career server down")
 
-    monkeypatch.setattr(jolpica, "get_driver_career", boom)
-    monkeypatch.setattr(jolpica, "get_driver_wins", boom)
+    monkeypatch.setattr(openf1, "get_career", boom)
     set_session(9523)
 
     out = await get_driver_info.ainvoke({"driver_number": 44})

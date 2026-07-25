@@ -9,9 +9,9 @@ class Settings(BaseSettings):
     llm_model: str = "gpt-4.1"
     openai_api_key: str = ""
 
-    # 데이터 소스
+    # 데이터 소스(직결 폴백용). 기본 경로는 F1_XR_Server 경유이며,
+    # 커리어(Jolpica)도 서버가 담당하므로 AI는 Jolpica를 직접 호출하지 않는다.
     openf1_base: str = "https://api.openf1.org/v1"
-    jolpica_base: str = "https://api.jolpi.ca/ergast/f1"
 
     # F1_XR_Server (리플레이/데이터 백엔드) — 있으면 여기 경유, 없으면 OpenF1 직접
     f1_server_url: str = ""
