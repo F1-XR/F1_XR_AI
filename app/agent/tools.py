@@ -42,6 +42,9 @@ async def find_session(year: int, race: str, session_name: str = "Race") -> dict
                 "note": f"{year} {race} {session_name} 경기를 찾지 못했어요. 영문 지명으로 다시 시도해 보세요."}
     s = sessions[0]
     set_session(s["session_key"])
+    # 말로 경기를 바꿨으면 Unity 화면도 그 경기로 전환하도록 명령한다
+    # (에이전트 context와 Unity 화면을 항상 일치시킨다).
+    emit_command("loadSession", session_key=s["session_key"])
     return {
         "found": True,
         "session_key": s.get("session_key"),

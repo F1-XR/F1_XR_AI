@@ -12,24 +12,55 @@
 """
 from __future__ import annotations
 
+import logging
+
 from langchain_openai import ChatOpenAI
 from langgraph.prebuilt import create_react_agent
 
 from ..config import settings
 from .commands import drain, start_capture
-from .context import set_context
+from .context import current_session, current_time, set_context
 from .tools import ALL_TOOLS
+
+logger = logging.getLogger(__name__)
 
 SYSTEM_PROMPT = """당신은 F1을 처음 보는 사람을 위한 친절한 관람 가이드입니다.
 
 원칙:
-- 사용자가 특정 경기(연도·나라·서킷)를 언급하면 먼저 find_session으로 그 경기로 전환한 뒤 답하세요.
+- 사용자는 지금 리플레이 화면을 보며 그 경기에 대해 묻습니다. 아래 '현재 관람 맥락'에
+  경기가 지정되어 있으면 '어느 경기인지'는 되묻지 말고 그 경기 기준으로 답하세요.
+- 단, 선수·장면·행동의 '대상'이 불명확하면(예: "쟤 왜 저래?"의 '쟤'가 누군지 모호)
+  지어내지 말고 무엇을 말하는지 짧게 되물어 확인하세요.
+  (경기는 이미 알지만, 대상이 애매하면 확인해도 됩니다.)
+- 사용자가 다른 경기(연도·나라·서킷)로 바꾸길 원하면 그때만 find_session을 호출하세요.
 - 항상 도구로 얻은 실제 데이터에 근거해 답하세요. 모르면 모른다고 하세요(지어내지 말 것).
 - 초등학생도 이해할 만큼 쉽고 짧게, 존댓말로 설명하세요.
 - 선수를 언급하면 필요 시 highlight_driver로 화면에서 함께 짚어주세요.
 - "천천히 다시 보여줘"처럼 여러 동작이 섞인 요청은 도구를 순서대로 여러 번 호출하세요.
 - 전문용어가 나오면 먼저 explain_concept로 뜻을 풀어주세요.
 """
+
+
+def _context_message() -> str | None:
+    """이번 발화의 '현재 관람 맥락'(경기·시각)을 LLM에게 알려주는 시스템 메시지.
+
+    유니티가 매 발화에 session_key/at_time을 보내면, 그 값이 여기 담겨 LLM이
+    '지금 무슨 경기를 보고 있는지'를 알게 된다. 그래서 '왜 피트인?' 같은 질문에도
+    어느 경기인지 되묻지 않는다.
+    """
+    session = current_session()
+    if session is None:
+        return None
+    lines = [
+        "[현재 관람 맥락] 사용자는 지금 아래 경기 리플레이를 보고 있습니다. "
+        "'어느 경기인지'는 되묻지 말고 이 경기·시각 기준으로 답하세요. "
+        "(단, 선수·장면 등 '대상'이 애매하면 그건 확인차 되물어도 됩니다.)",
+        f"- 현재 경기 세션 ID: {session}",
+    ]
+    at = current_time()
+    if at:
+        lines.append(f"- 리플레이 현재 시각: {at} (이 시각 이후의 미래 결과는 아직 일어나지 않았으니 언급 금지)")
+    return "\n".join(lines)
 
 
 def build_agent():
@@ -76,9 +107,22 @@ async def run_agent(
     set_context(session_key, at_time)   # 이번 요청의 세션/시각 고정
     start_capture()                     # 명령 버퍼 열기
 
-    messages = list(history or []) + [("user", text)]
-    result = await get_agent().ainvoke({"messages": messages})
-    reply = result["messages"][-1].content
-
-    commands = drain()                  # 도구가 쌓아둔 Unity 명령 회수
-    return reply, commands
+    # 현재 관람 맥락(경기·시각)을 시스템 메시지로 주입 → LLM이 지금 경기를 안다.
+    messages: list = []
+    ctx = _context_message()
+    if ctx:
+        messages.append(("system", ctx))
+    messages += list(history or []) + [("user", text)]
+    try:
+        result = await get_agent().ainvoke({"messages": messages})
+        reply = result["messages"][-1].content
+        if not isinstance(reply, str):
+            reply = str(reply)
+        commands = drain()              # 도구가 쌓아둔 Unity 명령 회수
+        return reply, commands
+    except Exception:
+        # LLM·도구·데이터서버 오류 시 대화를 끊지 않고 우아하게 실패한다.
+        # (에러는 로그로 남기고, 사용자에겐 짧은 안내만.)
+        logger.exception("run_agent 처리 중 오류")
+        drain()                         # 남은 명령 버퍼 비우기
+        return "죄송해요, 잠시 문제가 생겼어요. 다시 한 번 말씀해 주세요.", []

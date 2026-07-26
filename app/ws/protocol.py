@@ -17,7 +17,7 @@ class Utterance(BaseModel):
 
 # ── Server(AI) → Client(Unity) ──
 class Command(BaseModel):
-    """Unity가 실행할 명령. name ∈ {highlightDriver, controlReplay, pointOut}"""
+    """Unity가 실행할 명령. name ∈ {loadSession, highlightDriver, controlReplay, pointOut}"""
     type: str = "command"
     name: str
     args: dict
