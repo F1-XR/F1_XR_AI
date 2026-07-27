@@ -18,13 +18,34 @@ class STTProvider:
 
 
 class WhisperTurboSTT(STTProvider):
-    """Whisper large-v3-turbo (+faster-whisper). MIT·경량·검증된 한국어. 안전 기본값.
+    """Whisper large-v3-turbo (faster-whisper). MIT·검증된 한국어. 안전 기본값.
 
-    TODO(Day12): faster-whisper 로드 후 audio(pcm/wav) → text 변환 구현.
+    설치(최초 1회, Python 3.11 권장): pip install faster-whisper
+    첫 호출 때 모델 가중치를 자동 다운로드한다.
     """
 
+    def __init__(self) -> None:
+        self._model = None      # 무거우니 첫 호출 때 1회만 로드(지연 로드)
+
+    def _ensure_loaded(self) -> None:
+        if self._model is None:
+            from faster_whisper import WhisperModel  # 지연 import (미설치여도 모듈 로드는 됨)
+            # cpu+int8: GPU 없이도 동작. GPU 있으면 device="cuda", compute_type="float16"로.
+            self._model = WhisperModel(settings.stt_model, device="cpu", compute_type="int8")
+
     async def transcribe(self, audio: bytes, language: str = "ko") -> str:
-        raise NotImplementedError("WhisperTurboSTT 미구현 — faster-whisper 연결 예정")
+        import asyncio
+        import io
+
+        self._ensure_loaded()
+
+        def _run() -> str:
+            # faster-whisper는 파일 경로/파일객체/numpy를 받는다 → wav 바이트를 BytesIO로 감싼다.
+            segments, _info = self._model.transcribe(io.BytesIO(audio), language=language)
+            return "".join(seg.text for seg in segments).strip()
+
+        # transcribe는 동기(블로킹) → 이벤트 루프를 막지 않게 스레드에서 실행.
+        return await asyncio.to_thread(_run)
 
 
 class VoxtralSTT(STTProvider):

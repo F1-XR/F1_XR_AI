@@ -156,6 +156,11 @@ venv/
 ENV/
 env.bak/
 venv.bak/
+venv-voice/
+venv*/
+
+# 음성 산출물(테스트 wav 등)
+*.wav
 
 # Spyder project settings
 .spyderproject

@@ -15,6 +15,14 @@ class Utterance(BaseModel):
     at_time: str | None = None          # 현재 리플레이 시각(ISO)
 
 
+class AudioUtterance(BaseModel):
+    """음성 발화 — base64로 인코딩한 wav. 서버가 STT로 텍스트 변환 후 에이전트로 넘긴다."""
+    type: str = "audio_utterance"
+    data: str                            # base64 wav
+    session_key: int | None = None
+    at_time: str | None = None
+
+
 # ── Server(AI) → Client(Unity) ──
 class Command(BaseModel):
     """Unity가 실행할 명령. name ∈ {loadSession, highlightDriver, controlReplay, pointOut}"""
@@ -23,12 +31,18 @@ class Command(BaseModel):
     args: dict
 
 
+class Transcript(BaseModel):
+    """STT 인식 결과(음성 발화가 뭐로 인식됐는지 자막 확인용)."""
+    type: str = "transcript"
+    text: str
+
+
 class AssistantText(BaseModel):
     type: str = "assistant_text"
-    text: str
+    text: str                            # 응답 자막(Unity 화면 표시용)
 
 
 class TtsAudio(BaseModel):
     type: str = "tts_audio"
     format: str = "wav"
-    data: str                            # base64 (Day14부터)
+    data: str                            # base64 wav (TTS 합성 결과)

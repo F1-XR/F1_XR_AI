@@ -12,7 +12,14 @@ class Settings(BaseSettings):
 
     # 음성 공급자 — .env 의 STT_PROVIDER/TTS_PROVIDER 로 교체(모델 교체 시 여기만 바꿈)
     stt_provider: str = "whisper"    # whisper | voxtral
-    tts_provider: str = "melotts"    # melotts | cosyvoice2 | elevenlabs
+    tts_provider: str = "qwen3"    # melotts | qwen3 | cosyvoice2 | elevenlabs
+    stt_model: str = "large-v3-turbo"   # faster-whisper 모델 (large-v3-turbo | small | base)
+
+    # Qwen3-TTS 전용 (tts_provider=qwen3 일 때만 사용)
+    qwen_tts_model: str = "Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice"
+    tts_speaker: str = "Sohee"       # 한국어 여성 화자(Qwen3). 다른 화자로 바꿔 실험 가능
+    tts_instruct: str = ""           # 말투 지시(예: "밝고 친절한 톤으로"). 비우면 기본
+    tts_enabled: bool = True         # WS 응답에 TTS 오디오 포함 여부(.env: TTS_ENABLED=false 로 끔)
 
     # 데이터 소스(직결 폴백용). 기본 경로는 F1_XR_Server 경유이며,
     # 커리어(Jolpica)도 서버가 담당하므로 AI는 Jolpica를 직접 호출하지 않는다.

@@ -64,6 +64,62 @@ class MeloTTSKoreanTTS(TTSProvider):
         return await asyncio.to_thread(_run)
 
 
+class Qwen3CustomVoiceTTS(TTSProvider):
+    """Qwen3-TTS 0.6B CustomVoice(Alibaba). Apache·다국어·한국어 지원.
+
+    speaker="Sohee" = 따뜻한 한국어 여성 목소리(.env 의 TTS_SPEAKER 로 교체).
+    말투는 TTS_INSTRUCT 로 자연어 지시 가능(예: "밝고 친절한 톤으로").
+
+    설치(최초 1회, Python 3.11/3.12 venv): pip install -U qwen-tts
+    GPU 있으면 자동으로 cuda+bf16(flash-attn), 없으면 cpu(float32)로 폴백(느릴 수 있음).
+    첫 호출 때 모델 가중치를 자동 다운로드한다(수 GB).
+    """
+
+    def __init__(self) -> None:
+        self._model = None      # 무거우니 첫 호출 때 1회만 로드(지연 로드)
+
+    def _ensure_loaded(self) -> None:
+        if self._model is not None:
+            return
+        import torch
+        from qwen_tts import Qwen3TTSModel  # 지연 import — 미설치여도 모듈 로드는 됨
+
+        if torch.cuda.is_available():
+            device_map, dtype, attn = "cuda:0", torch.bfloat16, "flash_attention_2"
+        else:
+            # GPU 없을 때 폴백: flash-attn 불가 → eager, float32
+            device_map, dtype, attn = "cpu", torch.float32, "eager"
+
+        self._model = Qwen3TTSModel.from_pretrained(
+            settings.qwen_tts_model,
+            device_map=device_map,
+            dtype=dtype,
+            attn_implementation=attn,
+        )
+
+    async def synthesize(self, text: str) -> bytes:
+        import asyncio
+        import io
+
+        self._ensure_loaded()
+
+        def _run() -> bytes:
+            import soundfile as sf
+
+            kwargs = {"text": text, "language": "Korean", "speaker": settings.tts_speaker}
+            if settings.tts_instruct:
+                kwargs["instruct"] = settings.tts_instruct
+            wavs, sr = self._model.generate_custom_voice(**kwargs)
+
+            # numpy 파형 → wav 바이트 (파일 안 거치고 메모리에서 인코딩)
+            buf = io.BytesIO()
+            sf.write(buf, wavs[0], sr, format="WAV")
+            return buf.getvalue()
+
+        # 합성은 동기(블로킹) → 이벤트 루프를 막지 않게 스레드에서 실행.
+        return await asyncio.to_thread(_run)
+
+
 class CosyVoice2TTS(TTSProvider):
     """CosyVoice2. 자연스러움·스트리밍·보이스클로닝·한국어. GPU 권장.
 
@@ -86,6 +142,7 @@ class ElevenLabsTTS(TTSProvider):
 
 _PROVIDERS: dict[str, type[TTSProvider]] = {
     "melotts": MeloTTSKoreanTTS,
+    "qwen3": Qwen3CustomVoiceTTS,
     "cosyvoice2": CosyVoice2TTS,
     "elevenlabs": ElevenLabsTTS,
 }

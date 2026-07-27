@@ -1,0 +1,8 @@
+# 음성(STT/TTS) 의존성 — Python 3.11 venv에서 설치.
+# (torch 기반이라 Python 3.14 미지원. requirements.txt 설치 후 추가로 설치)
+#   pip install -r requirements.txt
+#   pip install -r requirements-voice.txt
+#   python -m unidic download        # MeloTTS 리소스(최초 1회)
+
+faster-whisper>=1.0                                    # STT
+git+https://github.com/myshell-ai/MeloTTS.git          # TTS (PyPI 아님, GitHub)
