@@ -35,6 +35,8 @@ SYSTEM_PROMPT = """당신은 F1을 처음 보는 사람을 위한 친절한 관�
 - 사용자가 다른 경기(연도·나라·서킷)로 바꾸길 원하면 그때만 find_session을 호출하세요.
 - 항상 도구로 얻은 실제 데이터에 근거해 답하세요. 모르면 모른다고 하세요(지어내지 말 것).
 - 초등학생도 이해할 만큼 쉽고 짧게, 존댓말로 설명하세요.
+- '1등·2등'은 순위(position)이고 '1번·16번'은 차량 번호(driver_number)입니다. 둘을 절대 혼동하지 마세요.
+- 선수는 약칭(VER)이 아니라 한국어 전체 이름(예: 막스 베르스타펜)으로 말하세요. 순위는 도구가 준 standings 값을 그대로 쓰고 지어내지 마세요.
 - 선수를 언급하면 필요 시 highlight_driver로 화면에서 함께 짚어주세요.
 - "천천히 다시 보여줘"처럼 여러 동작이 섞인 요청은 도구를 순서대로 여러 번 호출하세요.
 - 전문용어가 나오면 먼저 explain_concept로 뜻을 풀어주세요.
@@ -69,11 +71,9 @@ def build_agent():
         temperature=0.3,
         api_key=settings.openai_api_key or None,
     )
-    try:
-        return create_react_agent(llm, ALL_TOOLS, prompt=SYSTEM_PROMPT)
-    except TypeError:
-        # 구버전 langgraph 호환 (prompt → state_modifier)
-        return create_react_agent(llm, ALL_TOOLS, state_modifier=SYSTEM_PROMPT)
+    # SYSTEM_PROMPT는 run_agent에서 '동적 관람 맥락'과 합쳐 하나의 system 메시지로
+    # 주입한다. 여기서 prompt=로 또 넣으면 system 메시지가 둘이 되므로 넣지 않는다.
+    return create_react_agent(llm, ALL_TOOLS)
 
 
 # 에이전트는 첫 요청 때 lazy 생성한다.
@@ -107,12 +107,12 @@ async def run_agent(
     set_context(session_key, at_time)   # 이번 요청의 세션/시각 고정
     start_capture()                     # 명령 버퍼 열기
 
-    # 현재 관람 맥락(경기·시각)을 시스템 메시지로 주입 → LLM이 지금 경기를 안다.
-    messages: list = []
+    # SYSTEM_PROMPT(고정 지침) + 현재 관람 맥락(동적)을 하나의 system 메시지로 합쳐 주입.
+    system = SYSTEM_PROMPT
     ctx = _context_message()
     if ctx:
-        messages.append(("system", ctx))
-    messages += list(history or []) + [("user", text)]
+        system = f"{SYSTEM_PROMPT}\n\n{ctx}"
+    messages: list = [("system", system)] + list(history or []) + [("user", text)]
     try:
         result = await get_agent().ainvoke({"messages": messages})
         reply = result["messages"][-1].content
@@ -120,9 +120,17 @@ async def run_agent(
             reply = str(reply)
         commands = drain()              # 도구가 쌓아둔 Unity 명령 회수
         return reply, commands
-    except Exception:
+    except Exception as exc:
         # LLM·도구·데이터서버 오류 시 대화를 끊지 않고 우아하게 실패한다.
         # (에러는 로그로 남기고, 사용자에겐 짧은 안내만.)
         logger.exception("run_agent 처리 중 오류")
         drain()                         # 남은 명령 버퍼 비우기
+        # 설정(모델·키) 오류는 첫 세팅 때 원인이 보여야 하므로 명확히 안내한다.
+        m = str(exc).lower()
+        if any(k in m for k in ("model", "api_key", "authentication", "credential", "invalid")):
+            return (
+                f"⚠️ 설정 오류로 보여요: {exc}\n"
+                "→ .env 의 OPENAI_API_KEY / LLM_MODEL 을 확인하세요. "
+                "(모델 목록: python -m scripts.list_models)"
+            ), []
         return "죄송해요, 잠시 문제가 생겼어요. 다시 한 번 말씀해 주세요.", []

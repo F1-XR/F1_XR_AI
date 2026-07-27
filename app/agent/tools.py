@@ -125,15 +125,25 @@ async def get_race_status() -> dict:
         prev = latest.get(dn)
         if prev is None or (d or "") >= (prev[0] or ""):
             latest[dn] = (d, pos)
+    # 번호→약칭 매핑을 붙여 순위를 사람이 알아보게 한다.
+    # (도구가 번호만 주면 LLM이 '1등'(순위)과 '1번'(차량번호)을 혼동할 수 있음)
+    try:
+        name_of = {
+            d.get("driver_number"): (d.get("full_name") or d.get("name_acronym"))
+            for d in await openf1.get_drivers(session)
+        }
+    except Exception:
+        name_of = {}
+
     standings = [
-        {"position": pos, "driver_number": dn}
+        {"position": pos, "driver_number": dn, "driver": name_of.get(dn)}
         for dn, (d, pos) in sorted(latest.items(), key=lambda kv: kv[1][1])
     ]
 
     return {
         "latest_flag": latest_flag,
         "safety_car": safety_car,
-        "standings": standings[:5],
+        "standings": standings[:5],   # [{position, driver_number, driver(전체 이름)}]
         "at_time": cutoff,
     }
 

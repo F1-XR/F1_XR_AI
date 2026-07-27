@@ -50,6 +50,11 @@ async def get_driver(session_key: int, driver_number: int) -> dict | None:
     return rows[0] if rows else None
 
 
+async def get_drivers(session_key: int) -> list[dict]:
+    """세션의 전체 드라이버 목록(번호→이름 매핑 등에 사용)."""
+    return await _get_resource(session_key, "drivers")
+
+
 async def get_race_control(session_key: int) -> list[dict]:
     """깃발·세이프티카·인시던트 등 경기 상황 이벤트 원본."""
     return await _get_resource(session_key, "race_control")

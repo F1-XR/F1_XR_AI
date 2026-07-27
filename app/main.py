@@ -16,6 +16,9 @@ logger = logging.getLogger(__name__)
 
 app = FastAPI(title="F1 Tutor Agent")
 
+# 대화 history 상한(한 턴 = user+assistant 2개). 토큰·비용·지연 관리.
+MAX_HISTORY_TURNS = 8
+
 
 @app.get("/health")
 def health():
@@ -44,6 +47,7 @@ async def ws(websocket: WebSocket):
                     history=history,
                 )
                 history += [("user", text), ("assistant", reply)]
+                del history[: -MAX_HISTORY_TURNS * 2]   # 최근 N턴만 유지
 
                 for cmd in commands:               # ① Unity 명령 먼저
                     await websocket.send_json(cmd)

@@ -10,13 +10,13 @@ from __future__ import annotations
 
 import asyncio
 
-from app.data import openf1, jolpica
+from app.data import openf1
 from app.config import settings
 
 
 async def main() -> None:
     sk = settings.default_session_key
-    print(f"[세션 {sk}] OpenF1·Jolpica 점검\n")
+    print(f"[세션 {sk}] OpenF1·커리어(서버) 점검\n")
 
     ok = True
     try:
@@ -34,11 +34,14 @@ async def main() -> None:
         print("❌ OpenF1 race_control:", type(e).__name__, e)
 
     try:
-        c = await jolpica.get_driver_career("hamilton")
-        print("✅ Jolpica career:", c and (c["givenName"], c["familyName"], c["nationality"]))
+        c = await openf1.get_career(sk, 44)
+        if c:
+            print("✅ career(서버):", (c.get("nationality"), c.get("wins")))
+        else:
+            print("ℹ️ career: 빈 결과 — F1_SERVER_URL 없으면 커리어는 서버 전용이라 생략됨")
     except Exception as e:
         ok = False
-        print("❌ Jolpica career:", type(e).__name__, e)
+        print("❌ career:", type(e).__name__, e)
 
     print("\n결과:", "전부 성공 🎉" if ok else "일부 실패 — 위 오류 확인")
 

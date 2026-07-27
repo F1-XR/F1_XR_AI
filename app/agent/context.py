@@ -1,35 +1,44 @@
 """요청 컨텍스트 — 현재 보고 있는 세션/리플레이 시각.
 
-사용자가 "지금 상황?"이라고 물을 때의 '지금'은 Unity 리플레이의 현재 시각이다.
-WS 메시지로 넘어온 session_key/at_time을 요청 동안 여기 담아두면,
-도구들은 매번 인자로 받지 않고도 현재 맥락을 읽을 수 있다.
+commands.py와 같은 방식: contextvar에 dict를 담고 그 '내용을 in-place mutate'한다.
+→ 요청별 격리(다중 사용자 안전) + find_session의 세션 변경이 langgraph 도구
+  태스크(컨텍스트 복사본)에서도 전파됨 — 같은 dict 객체를 공유하므로 mutate가 보인다.
+  (재바인딩 `.set`은 자식 태스크로 전파되지 않지만, dict 내용 mutate는 전파된다.)
 """
 from __future__ import annotations
 
+import contextvars
+
 from ..config import settings
 
-# find_session 도구가 대화 중 세션(경기)을 바꿀 수 있어야 한다. langgraph는 도구를
-# 태스크 컨텍스트 복사본에서 실행할 수 있어 contextvar 재바인딩이 전파되지 않는다.
-# 그래서 모듈 전역 dict 를 in-place 로 mutate 하는 방식으로 둔다.
-# (단일 사용자 데모 기준. 다중 사용자 서버로 확장 시 연결별 상태로 분리 필요.)
-_STATE: dict = {"session": settings.default_session_key, "at_time": None}
+_ctx: contextvars.ContextVar[dict] = contextvars.ContextVar("req_ctx")
+
+
+def _state() -> dict:
+    """이 요청(태스크)의 상태 dict. 없으면 기본값으로 생성."""
+    try:
+        return _ctx.get()
+    except LookupError:
+        d = {"session": settings.default_session_key, "at_time": None}
+        _ctx.set(d)
+        return d
 
 
 def set_context(session_key: int | None, at_time: str | None) -> None:
-    """요청 시작 시 세션/시각 설정. session_key 가 None(예: CLI)이면 기존 값 유지."""
-    if session_key is not None:
-        _STATE["session"] = session_key
-    _STATE["at_time"] = at_time
+    """요청 시작 시 세션/시각 설정. session_key None(예: CLI)이면 기존 세션 유지."""
+    cur = _state()
+    session = session_key if session_key is not None else cur["session"]
+    _ctx.set({"session": session, "at_time": at_time})
 
 
 def set_session(session_key: int) -> None:
-    """find_session 이 경기를 전환할 때 호출."""
-    _STATE["session"] = session_key
+    """find_session이 경기를 전환할 때 호출 — dict를 in-place mutate(자식 태스크 전파 목적)."""
+    _state()["session"] = session_key
 
 
 def current_session() -> int:
-    return _STATE["session"]
+    return _state()["session"]
 
 
-def current_time():
-    return _STATE["at_time"]
+def current_time() -> str | None:
+    return _state()["at_time"]

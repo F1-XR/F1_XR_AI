@@ -11,3 +11,8 @@ python-dotenv>=1.0
 # dev
 pytest>=8.0
 pytest-asyncio>=0.23
+
+# 음성(선택) — 필요할 때만, 되도록 Python 3.11 별도 venv에서 설치.
+#   (MeloTTS/torch는 Python 3.14 미지원. PyPI 'melotts'는 깨진 패키지 → GitHub로 설치)
+# TTS: pip install git+https://github.com/myshell-ai/MeloTTS.git  (+ python -m unidic download)
+# STT: pip install faster-whisper
