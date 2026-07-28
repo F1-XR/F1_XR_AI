@@ -20,6 +20,7 @@ class Settings(BaseSettings):
     tts_speaker: str = "Sohee"       # 한국어 여성 화자(Qwen3). 다른 화자로 바꿔 실험 가능
     tts_instruct: str = ""           # 말투 지시(예: "밝고 친절한 톤으로"). 비우면 기본
     tts_enabled: bool = True         # WS 응답에 TTS 오디오 포함 여부(.env: TTS_ENABLED=false 로 끔)
+    warmup_on_start: bool = True     # 서버 부팅 시 STT/TTS 모델 미리 로드(첫 요청 지연 제거)
 
     # 데이터 소스(직결 폴백용). 기본 경로는 F1_XR_Server 경유이며,
     # 커리어(Jolpica)도 서버가 담당하므로 AI는 Jolpica를 직접 호출하지 않는다.

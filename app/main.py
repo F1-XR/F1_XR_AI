@@ -12,6 +12,7 @@ from __future__ import annotations
 import base64
 import binascii
 import logging
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 
@@ -21,7 +22,28 @@ from .voice import stt, tts
 
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="F1 Tutor Agent")
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """서버 부팅 시 STT/TTS 모델을 미리 로드(워밍업)한다.
+
+    기본은 첫 요청 때 모델을 로드하는데(지연 로드), 그러면 '첫 사용자'만 크게 느리다.
+    부팅 때 더미 합성/인식을 1회 돌려 모델을 메모리에 올려두면 첫 실요청이 빠르다.
+    (부팅이 그만큼 늦어지지만, 준비되면 매 요청이 빨라진다.)
+    """
+    if settings.warmup_on_start:
+        try:
+            logger.info("워밍업: STT/TTS 모델 미리 로드 중…")
+            if settings.tts_enabled:
+                audio = await tts.synthesize("안녕하세요.")
+                await stt.transcribe(audio, language="ko")  # TTS 결과로 STT까지 예열
+            logger.info("워밍업 완료 — 이제 요청이 빠릅니다.")
+        except Exception:
+            logger.exception("워밍업 실패(무시하고 계속 — 첫 요청에서 로드됨)")
+    yield
+
+
+app = FastAPI(title="F1 Tutor Agent", lifespan=lifespan)
 
 # 대화 history 상한(한 턴 = user+assistant 2개). 토큰·비용·지연 관리.
 MAX_HISTORY_TURNS = 8
