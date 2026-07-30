@@ -68,12 +68,34 @@ async def _transcribe_safe(data_b64: str) -> str | None:
         return None
 
 
+import re
+
+_SINO_ONES = ["", "일", "이", "삼", "사", "오", "육", "칠", "팔", "구"]
+
+
+def _sino(n: int) -> str:
+    """정수(1~99) → 한자어 한글. 예: 7→'칠', 44→'사십사', 16→'십육'."""
+    if n <= 0 or n > 99:
+        return str(n)
+    if n < 10:
+        return _SINO_ONES[n]
+    tens, ones = divmod(n, 10)
+    s = ("" if tens == 1 else _SINO_ONES[tens]) + "십"
+    return s + (_SINO_ONES[ones] if ones else "")
+
+
+def _normalize_ko_numbers(text: str) -> str:
+    """'N번/N등/N랩'의 숫자를 한자어 한글로 → TTS가 '칠 번'으로 읽게(‘일곱 번’ 방지).
+    드라이버 번호·순위·랩은 한국어에서 한자어로 읽는다."""
+    return re.sub(r"(\d+)\s*(번|등|랩)", lambda m: _sino(int(m.group(1))) + m.group(2), text)
+
+
 async def _synthesize_safe(text: str) -> str | None:
     """텍스트 → base64 wav. TTS가 꺼져있거나 실패하면 None(텍스트만 전송)."""
     if not settings.tts_enabled:
         return None
     try:
-        audio = await tts.synthesize(text)
+        audio = await tts.synthesize(_normalize_ko_numbers(text))
         return base64.b64encode(audio).decode("ascii")
     except Exception:
         logger.exception("TTS 합성 실패 — 텍스트만 전송")
@@ -111,6 +133,19 @@ async def ws(websocket: WebSocket):
         while True:
             msg = await websocket.receive_json()
             mtype = msg.get("type")
+
+            # 능동 안내(pointOut): 짧은 문장을 '음성만' 빠르게 합성해 돌려준다.
+            # 에이전트(LLM)를 안 거치므로 시간에 민감한 "곧 추월!" 안내에 적합.
+            if mtype == "speak":
+                say = msg.get("text")
+                if say:
+                    audio_b64 = await _synthesize_safe(say)
+                    if audio_b64 is not None:
+                        # 능동 안내 전용 타입 → Unity가 "답변 재생 중이면 건너뛰기"로 처리
+                        await websocket.send_json(
+                            {"type": "tts_announce", "format": "wav", "data": audio_b64}
+                        )
+                continue
 
             # 입력 정규화: 텍스트/음성 어느 쪽이 와도 text 한 줄로 만든다.
             if mtype == "utterance":

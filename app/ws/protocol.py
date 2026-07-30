@@ -23,6 +23,13 @@ class AudioUtterance(BaseModel):
     at_time: str | None = None
 
 
+class Speak(BaseModel):
+    """능동 안내(pointOut) 전용 — 짧은 문장을 '음성만' 빠르게 합성 요청.
+    에이전트(LLM)를 안 거치고 TTS만 → 시간에 민감한 안내에 사용. 응답은 tts_audio."""
+    type: str = "speak"
+    text: str
+
+
 # ── Server(AI) → Client(Unity) ──
 class Command(BaseModel):
     """Unity가 실행할 명령. name ∈ {loadSession, highlightDriver, controlReplay, pointOut}"""
