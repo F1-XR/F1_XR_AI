@@ -1,0 +1,150 @@
+{
+  "target": "label_position_gain",
+  "feature_schema_version": "event_type_v1_26",
+  "features": [
+    "season",
+    "circuit_key",
+    "circuit_type_code",
+    "is_lap1",
+    "restart_phase",
+    "air_temperature",
+    "track_temperature",
+    "humidity",
+    "rainfall",
+    "weather_regime_code",
+    "gap_ahead",
+    "gap_trend",
+    "position",
+    "tyre_age",
+    "tyre_age_delta",
+    "position_delta",
+    "same_lap",
+    "drs_range",
+    "speed",
+    "speed_delta",
+    "drs_active",
+    "track_progress",
+    "track_progress_sin",
+    "track_progress_cos",
+    "sector",
+    "segment"
+  ],
+  "feature_count": 26,
+  "missing_value_fill": -1.0,
+  "event_type_definition": {
+    "0": "no_change",
+    "1": "on_track_overtake",
+    "2": "pit_related_change",
+    "3": "retirement_related_change",
+    "4": "lapping_pass",
+    "5": "penalty_related_change",
+    "6": "restart_overtake",
+    "7": "uncertain"
+  },
+  "train_years": [
+    2023,
+    2024,
+    2025
+  ],
+  "test_year": null,
+  "probability_for_ui": "display_probability",
+  "raw_metrics": {
+    "roc_auc": 0.8944311375491354,
+    "pr_auc": 0.38679203444612187,
+    "brier": 0.053161476648769065
+  },
+  "display_metrics": {
+    "roc_auc": 0.8949429814455817,
+    "pr_auc": 0.37843462830825053,
+    "brier": 0.024022753584596164
+  },
+  "calibration": {
+    "method": "isotonic_year_oof",
+    "rows": 740057,
+    "folds": [
+      {
+        "fit_years": [
+          2024,
+          2025
+        ],
+        "valid_year": 2023,
+        "rows": 246193
+      },
+      {
+        "fit_years": [
+          2023,
+          2025
+        ],
+        "valid_year": 2024,
+        "rows": 230493
+      },
+      {
+        "fit_years": [
+          2023,
+          2024
+        ],
+        "valid_year": 2025,
+        "rows": 263371
+      }
+    ]
+  },
+  "calibration_path": "C:\\f1-overtake-pipeline\\data\\models\\races_initial_event_type_final_label_position_gain_calibration.json",
+  "per_circuit_metrics": [],
+  "training_filter": {
+    "method": "target_event_quality_filter",
+    "exclude_red_flag_train_races": false,
+    "overtake_positive_event_type": 1,
+    "overtake_allowed_event_types": [
+      0,
+      1
+    ],
+    "overtake_excluded_event_types": [
+      2,
+      3,
+      4,
+      5,
+      6,
+      7
+    ],
+    "group_columns": [
+      "season",
+      "circuit_short_name"
+    ],
+    "train_rows_before": 837804,
+    "train_rows_after": 740057,
+    "train_positive_before": 43855,
+    "train_positive_after": 23803,
+    "train_positive_rate_before": 0.05234517858592225,
+    "train_positive_rate_after": 0.032163738739043074,
+    "train_balance_before": {
+      "rows": 837804,
+      "positive": 43855,
+      "negative": 793949,
+      "positive_rate": 0.05234517858592225
+    },
+    "train_balance_after": {
+      "rows": 740057,
+      "positive": 23803,
+      "negative": 716254,
+      "positive_rate": 0.032163738739043074
+    },
+    "excluded_rows": 97747,
+    "excluded_groups": [
+      {
+        "target": "label_position_gain",
+        "rows": 67702,
+        "positive": 2170,
+        "positive_rate": 0.03205222888540959,
+        "reason": "control_window_exclusion"
+      },
+      {
+        "target": "label_position_gain",
+        "rows": 30045,
+        "positive": 17882,
+        "positive_rate": 0.5951739058079547,
+        "reason": "uncertain_event_type_exclusion"
+      }
+    ]
+  },
+  "split_report": null
+}

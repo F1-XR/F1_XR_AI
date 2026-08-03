@@ -8,6 +8,10 @@ pydantic>=2.6
 pydantic-settings>=2.2
 python-dotenv>=1.0
 
+# 추월 예측 모델 추론(app/ml) — 저장된 LightGBM 부스터 로드·예측·보정
+lightgbm>=4.0
+numpy>=1.24
+
 # dev
 pytest>=8.0
 pytest-asyncio>=0.23

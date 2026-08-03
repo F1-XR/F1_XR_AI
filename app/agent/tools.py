@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
 
 from langchain_core.tools import tool
@@ -18,6 +19,8 @@ from langchain_core.tools import tool
 from ..data import openf1
 from .commands import emit_command
 from .context import current_session, current_time, set_session
+
+logger = logging.getLogger(__name__)
 
 _GLOSSARY = json.loads(
     (Path(__file__).parent.parent / "data" / "glossary.json").read_text(encoding="utf-8")
@@ -244,6 +247,35 @@ async def jump_to_event(event_type: str) -> str:
     return f"'{event_type}' 장면({target_time})으로 이동했어요."
 
 
+# ────────────────────────────── 예측형 ──────────────────────────────
+
+@tool
+async def predict_overtake(driver_number: int) -> dict:
+    """지정 드라이버가 '앞으로 30초 안에' 추월/순위 변동할 **확률**을 예측한다.
+    "쟤 추월할 것 같아?", "곧 순위 바뀔까?", "추월 가능성 있어?"처럼 미래 가능성을 물을 때 사용.
+    학습된 예측 모델(LightGBM) 기반이며, 이미 일어난 사실이 아니라 '예측(추정치)'이다.
+    현재 리플레이 시각(at_time) 이하 데이터만 보므로 스포일러하지 않는다."""
+    session = current_session()
+    cutoff = current_time()
+    try:
+        from ..ml import features as _feat
+        from ..ml import predict as _pred
+        feats = await _feat.build_features(session, cutoff, driver_number)
+        probs = _pred.predict(feats)
+    except Exception:
+        logger.exception("추월 예측 실패")
+        return {"available": False, "note": "예측 모델을 부를 수 없어요(모델·의존성 확인 필요)."}
+
+    return {
+        "driver_number": driver_number,
+        "overtake_probability": probs.get("overtake_probability"),
+        "position_gain_probability": probs.get("position_gain_probability"),
+        "position_loss_probability": probs.get("position_loss_probability"),
+        "at_time": cutoff,
+        "note": "30초 내 확률(예측치). 결과가 정해진 게 아니라 데이터 기반 추정.",
+    }
+
+
 # 능동형 pointOutMoment는 사용자 발화가 아니라 서버 백그라운드 감시 루프가
 # 발동한다(app/agent/watcher.py, 확장 단계). 도구 목록에는 넣지 않는다.
 
@@ -256,4 +288,5 @@ ALL_TOOLS = [
     highlight_driver,
     control_replay,
     jump_to_event,
+    predict_overtake,
 ]

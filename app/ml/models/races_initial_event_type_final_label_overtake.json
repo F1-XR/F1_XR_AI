@@ -1,0 +1,171 @@
+{
+  "target": "label_overtake",
+  "feature_schema_version": "event_type_v1_26",
+  "features": [
+    "season",
+    "circuit_key",
+    "circuit_type_code",
+    "is_lap1",
+    "restart_phase",
+    "air_temperature",
+    "track_temperature",
+    "humidity",
+    "rainfall",
+    "weather_regime_code",
+    "gap_ahead",
+    "gap_trend",
+    "position",
+    "tyre_age",
+    "tyre_age_delta",
+    "position_delta",
+    "same_lap",
+    "drs_range",
+    "speed",
+    "speed_delta",
+    "drs_active",
+    "track_progress",
+    "track_progress_sin",
+    "track_progress_cos",
+    "sector",
+    "segment"
+  ],
+  "feature_count": 26,
+  "missing_value_fill": -1.0,
+  "event_type_definition": {
+    "0": "no_change",
+    "1": "on_track_overtake",
+    "2": "pit_related_change",
+    "3": "retirement_related_change",
+    "4": "lapping_pass",
+    "5": "penalty_related_change",
+    "6": "restart_overtake",
+    "7": "uncertain"
+  },
+  "train_years": [
+    2023,
+    2024,
+    2025
+  ],
+  "test_year": null,
+  "probability_for_ui": "display_probability",
+  "raw_metrics": {
+    "roc_auc": 0.8877965930179946,
+    "pr_auc": 0.36643982185436913,
+    "brier": 0.04877020615545761
+  },
+  "display_metrics": {
+    "roc_auc": 0.8884172085222976,
+    "pr_auc": 0.36235615633035567,
+    "brier": 0.021076827160272843
+  },
+  "calibration": {
+    "method": "isotonic_year_oof",
+    "rows": 618499,
+    "folds": [
+      {
+        "fit_years": [
+          2024,
+          2025
+        ],
+        "valid_year": 2023,
+        "rows": 199842
+      },
+      {
+        "fit_years": [
+          2023,
+          2025
+        ],
+        "valid_year": 2024,
+        "rows": 196646
+      },
+      {
+        "fit_years": [
+          2023,
+          2024
+        ],
+        "valid_year": 2025,
+        "rows": 222011
+      }
+    ]
+  },
+  "calibration_path": "C:\\f1-overtake-pipeline\\data\\models\\races_initial_event_type_final_label_overtake_calibration.json",
+  "per_circuit_metrics": [],
+  "training_filter": {
+    "method": "target_event_quality_filter",
+    "exclude_red_flag_train_races": false,
+    "overtake_positive_event_type": 1,
+    "overtake_allowed_event_types": [
+      0,
+      1
+    ],
+    "overtake_excluded_event_types": [
+      2,
+      3,
+      4,
+      5,
+      6,
+      7
+    ],
+    "group_columns": [
+      "season",
+      "circuit_short_name"
+    ],
+    "train_rows_before": 837804,
+    "train_rows_after": 618499,
+    "train_positive_before": 17179,
+    "train_positive_after": 17179,
+    "train_positive_rate_before": 0.020504795871110666,
+    "train_positive_rate_after": 0.02777530763994768,
+    "train_balance_before": {
+      "rows": 837804,
+      "positive": 17179,
+      "negative": 820625,
+      "positive_rate": 0.020504795871110666
+    },
+    "train_balance_after": {
+      "rows": 618499,
+      "positive": 17179,
+      "negative": 601320,
+      "positive_rate": 0.02777530763994768
+    },
+    "excluded_rows": 219305,
+    "excluded_groups": [
+      {
+        "target": "label_overtake",
+        "rows": 46434,
+        "positive": 0,
+        "positive_rate": 0.0,
+        "reason": "strict_on_track_event_type_exclusion"
+      },
+      {
+        "target": "label_overtake",
+        "rows": 63840,
+        "positive": 0,
+        "positive_rate": 0.0,
+        "reason": "control_window_exclusion"
+      },
+      {
+        "target": "label_overtake",
+        "rows": 3197,
+        "positive": 0,
+        "positive_rate": 0.0,
+        "reason": "pit_window_exclusion"
+      },
+      {
+        "target": "label_overtake",
+        "rows": 6880,
+        "positive": 0,
+        "positive_rate": 0.0,
+        "reason": "restart_phase_exclusion"
+      },
+      {
+        "target": "label_overtake",
+        "rows": 98954,
+        "positive": 0,
+        "positive_rate": 0.0,
+        "reason": "not_same_lap_exclusion"
+      }
+    ]
+  },
+  "split_report": null
+}

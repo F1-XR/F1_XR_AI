@@ -85,6 +85,64 @@ async def get_laps(session_key: int, driver_number: int | None = None) -> list[d
     return await _get_resource(session_key, "laps", driver_number)
 
 
+async def get_weather(session_key: int) -> list[dict]:
+    """세션 날씨(공기·트랙 온도·습도·강수) — 추월 예측 모델 피처용. 세션 단위 가벼운 조회."""
+    return await _get_resource(session_key, "weather")
+
+
+async def get_car_data_window(
+    session_key: int, driver_number: int, start_iso: str, end_iso: str
+) -> list[dict]:
+    """시점 근처 car_data(speed·drs) 창 — 추월 예측의 speed·drs_active·speed_delta 피처용.
+    car_data 세션 전체는 초대용량이라 반드시 드라이버 1명 + 짧은 시간창으로만 조회한다.
+    실패(미가용)하면 조용히 빈 리스트 → 해당 피처는 결측(-1.0) 폴백."""
+    base = _server_base()
+    if base:
+        url = f"{base}/f1/{session_key}/car_data"
+        params = {"driver_number": driver_number, "start": start_iso, "end": end_iso}
+    else:
+        url = f"{settings.openf1_base}/car_data"
+        params = {
+            "session_key": session_key,
+            "driver_number": driver_number,
+            "date>=": start_iso,
+            "date<": end_iso,
+        }
+    try:
+        async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
+            r = await client.get(url, params=params)
+            r.raise_for_status()
+            return r.json()
+    except Exception:
+        return []
+
+
+async def get_location_window(
+    session_key: int, driver_number: int, start_iso: str, end_iso: str
+) -> list[dict]:
+    """위치 좌표(x·y) 창 — track_progress 피처용(트랙 기준선/시점 좌표).
+    location도 세션 전체가 초대용량이라 드라이버+시간창으로만 조회. 실패 시 빈 리스트."""
+    base = _server_base()
+    if base:
+        url = f"{base}/f1/{session_key}/location"
+        params = {"driver_number": driver_number, "start": start_iso, "end": end_iso}
+    else:
+        url = f"{settings.openf1_base}/location"
+        params = {
+            "session_key": session_key,
+            "driver_number": driver_number,
+            "date>=": start_iso,
+            "date<": end_iso,
+        }
+    try:
+        async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
+            r = await client.get(url, params=params)
+            r.raise_for_status()
+            return r.json()
+    except Exception:
+        return []
+
+
 async def get_career(session_key: int, driver_number: int) -> dict:
     """선수 통산 기록(생년월일·국적·통산우승). 데이터 서버가 Jolpica를 캐시해 제공한다.
 
