@@ -8,11 +8,21 @@ from pydantic import BaseModel
 
 
 # ── Client(Unity) → Server(AI) ──
+class InteractionContext(BaseModel):
+    """공간 맥락 — 사용자가 XR Ray/클릭으로 '지목한' 대상. (Battle Lens Phase 1)
+    이게 있으면 "이 선수/이 차/얘" 같은 지시어를 해당 차량으로 해석한다.
+    번호를 채우는 입력이 XR Ray든 마우스 클릭이든 AI엔 동일하다."""
+    target_type: str | None = None       # 예: "driver"
+    driver_number: int | None = None     # 선택/지목된 차량 번호
+    input_modality: str | None = None    # "click" | "controller_ray" 등(로깅·분석용)
+
+
 class Utterance(BaseModel):
     type: str = "utterance"
     text: str
     session_key: int | None = None
     at_time: str | None = None          # 현재 리플레이 시각(ISO)
+    interaction_context: InteractionContext | None = None
 
 
 class AudioUtterance(BaseModel):
@@ -21,6 +31,7 @@ class AudioUtterance(BaseModel):
     data: str                            # base64 wav
     session_key: int | None = None
     at_time: str | None = None
+    interaction_context: InteractionContext | None = None
 
 
 class Speak(BaseModel):

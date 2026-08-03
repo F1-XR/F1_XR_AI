@@ -19,16 +19,21 @@ def _state() -> dict:
     try:
         return _ctx.get()
     except LookupError:
-        d = {"session": settings.default_session_key, "at_time": None}
+        d = {"session": settings.default_session_key, "at_time": None, "selected_driver": None}
         _ctx.set(d)
         return d
 
 
-def set_context(session_key: int | None, at_time: str | None) -> None:
-    """요청 시작 시 세션/시각 설정. session_key None(예: CLI)이면 기존 세션 유지."""
+def set_context(
+    session_key: int | None,
+    at_time: str | None,
+    selected_driver: int | None = None,
+) -> None:
+    """요청 시작 시 세션/시각/선택대상 설정. session_key None(예: CLI)이면 기존 세션 유지.
+    selected_driver: 사용자가 XR Ray/클릭으로 지목한 차량 번호("이 선수"의 대상)."""
     cur = _state()
     session = session_key if session_key is not None else cur["session"]
-    _ctx.set({"session": session, "at_time": at_time})
+    _ctx.set({"session": session, "at_time": at_time, "selected_driver": selected_driver})
 
 
 def set_session(session_key: int) -> None:
@@ -42,3 +47,8 @@ def current_session() -> int:
 
 def current_time() -> str | None:
     return _state()["at_time"]
+
+
+def current_selected() -> int | None:
+    """사용자가 지목한 차량 번호("이 선수"의 대상). 없으면 None."""
+    return _state().get("selected_driver")

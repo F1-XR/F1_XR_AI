@@ -108,11 +108,16 @@ async def _handle_utterance(websocket: WebSocket, text: str, msg: dict, history:
     Returns: 음성으로 경기를 바꿨으면(find_session→loadSession) 그 session_key, 아니면 None.
              호출부(ws)가 이 값을 연결 상태로 기억해 이후 발화에도 유지한다.
     """
+    # 공간 맥락: 사용자가 지목(클릭·XR Ray)한 차량 번호 → "이 선수" 해석용.
+    ictx = msg.get("interaction_context") or {}
+    selected_driver = ictx.get("driver_number")
+
     reply, commands = await run_agent(
         text=text,
         session_key=msg.get("session_key"),
         at_time=msg.get("at_time"),
         history=history,
+        selected_driver=selected_driver,
     )
     history += [("user", text), ("assistant", reply)]
     del history[: -MAX_HISTORY_TURNS * 2]   # 최근 N턴만 유지

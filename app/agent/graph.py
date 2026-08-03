@@ -19,7 +19,7 @@ from langgraph.prebuilt import create_react_agent
 
 from ..config import settings
 from .commands import drain, start_capture
-from .context import current_session, current_time, set_context
+from .context import current_selected, current_session, current_time, set_context
 from .tools import ALL_TOOLS
 
 logger = logging.getLogger(__name__)
@@ -65,6 +65,14 @@ def _context_message() -> str | None:
     at = current_time()
     if at:
         lines.append(f"- 리플레이 현재 시각: {at} (이 시각 이후의 미래 결과는 아직 일어나지 않았으니 언급 금지)")
+    sel = current_selected()
+    if sel:
+        lines.append(
+            f"- 사용자가 지금 화면에서 선택(지목)한 차량 번호: {sel}. "
+            f"'이 선수·이 차·얘·쟤·여기'처럼 대상을 가리키는 말은 이 {sel}번 차량을 뜻합니다. "
+            f"그러니 이런 지시어가 나오면 번호를 되묻지 말고 {sel}번 기준으로 도구를 호출하세요. "
+            f"(단, 사용자가 다른 번호·이름을 명시하면 그 대상을 우선합니다.)"
+        )
     return "\n".join(lines)
 
 
@@ -100,14 +108,18 @@ async def run_agent(
     session_key: int | None = None,
     at_time: str | None = None,
     history: list | None = None,
+    selected_driver: int | None = None,
 ) -> tuple[str, list[dict]]:
     """한 번의 사용자 발화를 처리한다.
+
+    Args:
+        selected_driver: 사용자가 XR Ray/클릭으로 지목한 차량 번호("이 선수"의 대상).
 
     Returns:
         reply: 사용자에게 보낼 한국어 텍스트(이후 TTS로 음성화)
         commands: Unity로 보낼 명령 리스트(마커·리플레이·점프)
     """
-    set_context(session_key, at_time)   # 이번 요청의 세션/시각 고정
+    set_context(session_key, at_time, selected_driver)   # 이번 요청의 세션/시각/선택대상 고정
     start_capture()                     # 명령 버퍼 열기
 
     # SYSTEM_PROMPT(고정 지침) + 현재 관람 맥락(동적)을 하나의 system 메시지로 합쳐 주입.
