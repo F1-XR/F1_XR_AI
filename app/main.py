@@ -102,8 +102,12 @@ async def _synthesize_safe(text: str) -> str | None:
         return None
 
 
-async def _handle_utterance(websocket: WebSocket, text: str, msg: dict, history: list) -> None:
-    """텍스트 한 건을 에이전트에 넘기고 명령·자막·음성을 순서대로 전송."""
+async def _handle_utterance(websocket: WebSocket, text: str, msg: dict, history: list) -> int | None:
+    """텍스트 한 건을 에이전트에 넘기고 명령·자막·음성을 순서대로 전송.
+
+    Returns: 음성으로 경기를 바꿨으면(find_session→loadSession) 그 session_key, 아니면 None.
+             호출부(ws)가 이 값을 연결 상태로 기억해 이후 발화에도 유지한다.
+    """
     reply, commands = await run_agent(
         text=text,
         session_key=msg.get("session_key"),
@@ -113,8 +117,12 @@ async def _handle_utterance(websocket: WebSocket, text: str, msg: dict, history:
     history += [("user", text), ("assistant", reply)]
     del history[: -MAX_HISTORY_TURNS * 2]   # 최근 N턴만 유지
 
+    switched_session: int | None = None
     for cmd in commands:                    # ③ Unity 명령 먼저
         await websocket.send_json(cmd)
+        # find_session이 경기를 바꾸면 loadSession 명령에 새 세션이 실린다 → 기억해 둔다.
+        if cmd.get("name") == "loadSession":
+            switched_session = (cmd.get("args") or {}).get("session_key", switched_session)
     await websocket.send_json(               # ④ 자막용 텍스트
         {"type": "assistant_text", "text": reply}
     )
@@ -123,16 +131,29 @@ async def _handle_utterance(websocket: WebSocket, text: str, msg: dict, history:
         await websocket.send_json(
             {"type": "tts_audio", "format": "wav", "data": audio_b64}
         )
+    return switched_session
 
 
 @app.websocket("/ws")
 async def ws(websocket: WebSocket):
     await websocket.accept()
     history: list = []
+    # 이 연결에서 마지막으로 보던 경기. 서버가 '현재 경기'를 직접 기억해,
+    #   ① 음성 find_session 전환이 이후 발화에도 유지되고
+    #   ② 발화에 session_key를 안 싣는 클라이언트(CLI 등)도 올바른 경기를 보게 한다.
+    # (전에는 태스크-로컬 contextvar의 우연한 유지에 기댔는데, 메시지 처리를 병렬화하면 깨진다.)
+    session_key: int | None = None
     try:
         while True:
             msg = await websocket.receive_json()
             mtype = msg.get("type")
+
+            # 세션 폴백: 발화에 session_key가 오면 그걸로 갱신(Unity가 다른 경기 로드 시 우선),
+            #            없으면 이 연결의 마지막 세션을 채워 넣는다.
+            if msg.get("session_key") is not None:
+                session_key = msg["session_key"]
+            elif session_key is not None:
+                msg["session_key"] = session_key
 
             # 능동 안내(pointOut): 짧은 문장을 '음성만' 빠르게 합성해 돌려준다.
             # 에이전트(LLM)를 안 거치므로 시간에 민감한 "곧 추월!" 안내에 적합.
@@ -162,7 +183,9 @@ async def ws(websocket: WebSocket):
 
             # 한 발화 처리 중 오류가 나도 연결·대화는 유지한다(우아한 실패).
             try:
-                await _handle_utterance(websocket, text, msg, history)
+                switched = await _handle_utterance(websocket, text, msg, history)
+                if switched is not None:      # 음성으로 경기를 바꿨으면 연결 상태에 반영
+                    session_key = switched
             except WebSocketDisconnect:
                 raise                        # 연결 끊김은 바깥에서 처리
             except Exception:

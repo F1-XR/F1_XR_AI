@@ -104,13 +104,34 @@ async def test_explain_why_structure(monkeypatch):
                         _aret([{"compound": "MEDIUM"}, {"compound": "HARD"}]))
     monkeypatch.setattr(openf1, "get_intervals",
                         _aret([{"interval": 2.0}, {"interval": 1.055}]))
-    set_session(9523)
+    set_context(9523, None)   # at_time 없음 → 전체(=최신) 반환, 필터 없음
 
     out = await explain_why.ainvoke({"driver_number": 44})
     assert out["driver_number"] == 44
     assert out["recent_gap"]["interval"] == 1.055   # 가장 최근 갭
     assert len(out["pit_stops"]) == 2
     assert "hint" in out
+
+
+async def test_explain_why_no_spoiler(monkeypatch):
+    """at_time(현재 시각) 이후의 피트·타이어·갭은 감춰야 한다(스포일러 방지)."""
+    # 현재 시각을 "m"으로 두면 "a"는 과거, "z"는 미래.
+    monkeypatch.setattr(openf1, "get_pit",
+                        _aret([{"date": "a", "lap_number": 5}, {"date": "z", "lap_number": 40}]))
+    monkeypatch.setattr(openf1, "get_stints",
+                        _aret([{"stint_number": 1, "compound": "MEDIUM"},
+                               {"stint_number": 2, "compound": "HARD"},
+                               {"stint_number": 3, "compound": "SOFT"}]))
+    monkeypatch.setattr(openf1, "get_intervals",
+                        _aret([{"date": "a", "interval": 2.0}, {"date": "z", "interval": 0.5}]))
+    set_context(9523, "m")   # 리플레이 현재 시각 = "m"
+
+    out = await explain_why.ainvoke({"driver_number": 44})
+    assert len(out["pit_stops"]) == 1                 # 미래 피트("z") 숨김
+    assert out["recent_gap"]["interval"] == 2.0       # 미래 갭(0.5) 아닌 현재 갭
+    compounds = [s["compound"] for s in out["tire_stints"]]
+    assert "SOFT" not in compounds                    # 아직 안 낀 미래 타이어 숨김
+    assert compounds == ["MEDIUM", "HARD"]
 
 
 # ───────────────────────── find_session ─────────────────────────

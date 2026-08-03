@@ -164,17 +164,32 @@ def explain_concept(term: str) -> dict:
 @tool
 async def explain_why(driver_number: int) -> dict:
     """특정 선수의 행동 이유를 데이터 근거로 설명한다. "쟤 왜 피트인했어?",
-    "왜 느려졌어?"처럼 '왜?'를 물을 때 사용한다. 타이어/피트/갭을 종합한다."""
+    "왜 느려졌어?"처럼 '왜?'를 물을 때 사용한다. 타이어/피트/갭을 종합한다.
+    리플레이 현재 시각(at_time) 이하의 데이터만 보므로 아직 안 지난 결과는 스포일러하지 않는다."""
     session = current_session()
+    cutoff = current_time()   # 리플레이 현재 시각(ISO). None이면 전체(=최신).
     pit = await openf1.get_pit(session, driver_number)
     stints = await openf1.get_stints(session, driver_number)
     intervals = await openf1.get_intervals(session, driver_number)
+
+    # 스포일러 방지: cutoff 이후(아직 안 지난 미래) 데이터는 감춘다. get_race_status와 동일 규칙.
+    if cutoff:
+        def _before(rows: list[dict]) -> list[dict]:
+            """date 필드가 있는 기록만 cutoff 이하로 컷(없으면 그대로 통과)."""
+            return [r for r in rows if not r.get("date") or r["date"] <= cutoff]
+
+        pit = _before(pit)
+        intervals = _before(intervals)
+        # 스틴트는 date가 없고 랩 기반이다. '피트 1회 = 새 스틴트 1개'이므로,
+        # 지금까지 완료된 피트 수(len(pit)) + 1개 스틴트까지만 남겨 미래 타이어 교체를 감춘다.
+        stints = sorted(stints, key=lambda s: s.get("stint_number") or 0)[: len(pit) + 1]
 
     return {
         "driver_number": driver_number,
         "pit_stops": pit[-3:] if pit else [],
         "tire_stints": stints[-3:] if stints else [],
         "recent_gap": intervals[-1] if intervals else None,
+        "at_time": cutoff,
         "hint": "타이어 스틴트가 길면 노후화로 피트인, 갭이 좁혀지면 추월 압박일 수 있음.",
     }
 
