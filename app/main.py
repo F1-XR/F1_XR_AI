@@ -9,6 +9,7 @@ Unity가 /ws로 붙어 발화(텍스트 또는 음성)를 보내면:
 """
 from __future__ import annotations
 
+import asyncio
 import base64
 import binascii
 import logging
@@ -17,6 +18,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 
 from .agent.graph import run_agent
+from .agent.watcher import watch
 from .config import settings
 from .voice import stt, tts
 
@@ -148,6 +150,22 @@ async def ws(websocket: WebSocket):
     #   ② 발화에 session_key를 안 싣는 클라이언트(CLI 등)도 올바른 경기를 보게 한다.
     # (전에는 태스크-로컬 contextvar의 우연한 유지에 기댔는데, 메시지 처리를 병렬화하면 깨진다.)
     session_key: int | None = None
+
+    # 예측형 능동 안내(watcher) 상태 — heartbeat로 갱신되는 최신 리플레이 상태 + 감시 태스크.
+    latest_state: dict = {"v": None}
+    watcher_task: asyncio.Task | None = None
+
+    async def _announce(driver_number: int, message: str) -> None:
+        """watcher가 부르는 콜백 — 그 차 강조 + 안내 음성(TTS). 둘 다 기존 Unity 처리 재사용."""
+        await websocket.send_json(
+            {"type": "command", "name": "highlightDriver", "args": {"driver_number": driver_number}}
+        )
+        audio_b64 = await _synthesize_safe(message)
+        if audio_b64 is not None:
+            await websocket.send_json({"type": "tts_announce", "format": "wav", "data": audio_b64})
+        else:   # TTS 꺼짐/실패 시 자막만
+            await websocket.send_json({"type": "assistant_text", "text": message})
+
     try:
         while True:
             msg = await websocket.receive_json()
@@ -159,6 +177,16 @@ async def ws(websocket: WebSocket):
                 session_key = msg["session_key"]
             elif session_key is not None:
                 msg["session_key"] = session_key
+
+            # 리플레이 상태 heartbeat — 발화 없이도 현재 시각을 알려준다(예측형 능동 안내용).
+            # 첫 heartbeat가 오고 기능이 켜져 있으면 감시 루프를 백그라운드로 시작한다.
+            if mtype == "replay_state":
+                latest_state["v"] = msg
+                if settings.predict_watcher_enabled and watcher_task is None:
+                    watcher_task = asyncio.create_task(
+                        watch(lambda: latest_state["v"], _announce)
+                    )
+                continue
 
             # 능동 안내(pointOut): 짧은 문장을 '음성만' 빠르게 합성해 돌려준다.
             # 에이전트(LLM)를 안 거치므로 시간에 민감한 "곧 추월!" 안내에 적합.
@@ -204,3 +232,6 @@ async def ws(websocket: WebSocket):
                     pass
     except WebSocketDisconnect:
         pass
+    finally:
+        if watcher_task is not None:        # 연결 끊기면 감시 루프 정리
+            watcher_task.cancel()

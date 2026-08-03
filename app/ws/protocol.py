@@ -41,6 +41,17 @@ class Speak(BaseModel):
     text: str
 
 
+class ReplayState(BaseModel):
+    """리플레이 상태 heartbeat — 발화가 없어도 서버가 현재 시각을 알게 주기 전송(0.5~1초).
+    예측형 능동 안내(watcher)가 '지금 몇 분인지'를 알아야 스스로 안내할 수 있다."""
+    type: str = "replay_state"
+    session_key: int | None = None
+    at_time: str | None = None       # 현재 리플레이 시각(ISO)
+    is_playing: bool = True
+    speed: float = 1.0
+    selected_driver: int | None = None
+
+
 # ── Server(AI) → Client(Unity) ──
 class Command(BaseModel):
     """Unity가 실행할 명령. name ∈ {loadSession, highlightDriver, controlReplay, pointOut}"""
