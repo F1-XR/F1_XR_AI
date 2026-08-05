@@ -9,6 +9,12 @@ class Settings(BaseSettings):
     # 실제 값은 .env 의 LLM_MODEL 이 덮어쓴다. 이건 .env 가 없을 때의 기본값.
     llm_model: str = "gpt-5.4-mini"
     openai_api_key: str = ""
+    # OpenAI 호환 엔드포인트 base_url. 비우면 OpenAI 본가.
+    # 로컬/호스팅 모델(예: Gemma 4)로 바꿀 때 .env 의 LLM_BASE_URL 로 지정.
+    llm_base_url: str = ""
+    # 응답 토큰 상한. 답변은 음성으로 읽어주므로 짧게 유지(장황 방지). 추론형 모델은
+    # '생각 토큰'도 여기 포함되니 너무 낮으면 답이 잘린다 → 320 안팎 권장. .env: LLM_MAX_TOKENS
+    llm_max_tokens: int = 320
 
     # 음성 공급자 — .env 의 STT_PROVIDER/TTS_PROVIDER 로 교체(모델 교체 시 여기만 바꿈)
     stt_provider: str = "whisper"    # whisper | voxtral
