@@ -11,11 +11,21 @@
 """
 from __future__ import annotations
 
+import time
+
 import httpx
 
 from ..config import settings
 
-_TIMEOUT = httpx.Timeout(10.0)
+_TIMEOUT = httpx.Timeout(30.0)   # 전체 세션 조회(intervals 등)가 느릴 수 있어 여유있게
+
+# 세션-전체(드라이버 무관) 리소스 짧은 캐시.
+# 능동 안내(watcher)는 매 틱 후보 드라이버마다 build_features를 도는데, 그 안에서
+# get_positions·get_weather 같은 '세션 전체' 조회를 드라이버 수만큼 반복한다(중복 HTTP → ReadTimeout).
+# 이 데이터는 세션 단위 과거 기록이라 값이 안 바뀌므로(파이썬에서 cutoff로 걸러 씀) 캐시가 안전하다.
+# 드라이버 지정 조회·시간창 조회는 캐시하지 않는다(개별성이 커서 이득이 작음).
+_CACHE_TTL = 10.0
+_cache: dict[tuple[int, str], tuple[float, list[dict]]] = {}
 
 
 def _server_base() -> str | None:
@@ -27,7 +37,14 @@ async def _get_resource(
     resource: str,
     driver_number: int | None = None,
 ) -> list[dict]:
-    """세션 단위 리소스 조회. 서버 경유가 기본, 없으면 OpenF1 직결."""
+    """세션 단위 리소스 조회. 서버 경유가 기본, 없으면 OpenF1 직결.
+    드라이버 무관 조회(driver_number=None)는 짧은 TTL로 캐시해 중복 HTTP를 막는다."""
+    cache_key = (session_key, resource) if driver_number is None else None
+    if cache_key is not None:
+        hit = _cache.get(cache_key)
+        if hit is not None and (time.monotonic() - hit[0]) < _CACHE_TTL:
+            return hit[1]
+
     base = _server_base()
     if base:
         url = f"{base}/f1/{session_key}/{resource}"
@@ -41,7 +58,11 @@ async def _get_resource(
     async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
         r = await client.get(url, params=params)
         r.raise_for_status()
-        return r.json()
+        data = r.json()
+
+    if cache_key is not None:
+        _cache[cache_key] = (time.monotonic(), data)
+    return data
 
 
 async def get_driver(session_key: int, driver_number: int) -> dict | None:

@@ -35,6 +35,12 @@ class MeloTTSKoreanTTS(TTSProvider):
 
     def _ensure_loaded(self) -> None:
         if self._model is None:
+            # nltk 3.10+ 는 'cwd에서 오는 수상한 import'를 막는 보안 훅(inisec)을 켠다.
+            # 우리 venv가 프로젝트 폴더 '안'에 있어(F1_XR_AI/venv), 정상 패키지인
+            # defusedxml(melo→g2p_en→nltk 의존)마저 'cwd 안'으로 오판돼 차단된다.
+            # -P·PYTHONSAFEPATH로는 안 꺼지는 훅이라, 오탐인 이 경우만 명시적으로 끈다.
+            import os
+            os.environ.setdefault("NLTK_DISABLE_IMPORT_SECURITY", "1")
             from melo.api import TTS  # 지연 import — melotts 미설치여도 모듈 로드는 됨
             self._model = TTS(language="KR", device="cpu")
             self._spk = self._model.hps.data.spk2id["KR"]

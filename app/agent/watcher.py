@@ -24,11 +24,16 @@ from ..data import openf1
 
 logger = logging.getLogger(__name__)
 
-_MAX_GAP = 1.5   # 이 값 이하 gap(초)인 드라이버만 예측 후보(접전)
+_MAX_GAP = 1.5        # 이 값 이하 gap(초)인 드라이버만 예측 후보(접전)
+_MAX_CANDIDATES = 6   # 매 틱 예측할 최대 인원(가장 붙은 순). 과도한 HTTP·예측 방지.
 
 
-async def _battle_drivers(session_key: int, cutoff: str | None, max_gap: float = _MAX_GAP) -> list[int]:
-    """지금(cutoff) 시점에 앞차와 max_gap 이내로 붙은 드라이버 번호들(접전 후보)."""
+async def _battle_drivers(
+    session_key: int, cutoff: str | None,
+    max_gap: float = _MAX_GAP, max_candidates: int = _MAX_CANDIDATES,
+) -> list[int]:
+    """지금(cutoff) 시점에 앞차와 max_gap 이내로 붙은 드라이버 중 '가장 붙은 상위 N명'.
+    전원 예측하면 매 틱 HTTP가 폭증(ReadTimeout)하므로 접전 상위 N명으로 제한한다."""
     rows = await openf1.get_intervals(session_key)
     latest: dict[int, tuple[str, float]] = {}
     for r in rows:
@@ -43,7 +48,9 @@ async def _battle_drivers(session_key: int, cutoff: str | None, max_gap: float =
             continue
         if dn not in latest or dt > latest[dn][0]:
             latest[dn] = (dt, iv)
-    return [dn for dn, (dt, iv) in latest.items() if 0 < iv < max_gap]
+    battles = [(dn, iv) for dn, (dt, iv) in latest.items() if 0 < iv < max_gap]
+    battles.sort(key=lambda x: x[1])        # 가장 붙은(gap 작은) 순
+    return [dn for dn, _iv in battles[:max_candidates]]
 
 
 async def watch(

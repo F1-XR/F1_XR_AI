@@ -104,9 +104,10 @@ async def _synthesize_safe(text: str) -> str | None:
         return None
 
 
-async def _handle_utterance(websocket: WebSocket, text: str, msg: dict, history: list) -> int | None:
+async def _handle_utterance(send, text: str, msg: dict, history: list) -> int | None:
     """텍스트 한 건을 에이전트에 넘기고 명령·자막·음성을 순서대로 전송.
 
+    send: 이 연결의 (Lock으로 직렬화된) 송신 함수. 직접 websocket.send_json을 쓰지 않는다.
     Returns: 음성으로 경기를 바꿨으면(find_session→loadSession) 그 session_key, 아니면 None.
              호출부(ws)가 이 값을 연결 상태로 기억해 이후 발화에도 유지한다.
     """
@@ -126,24 +127,30 @@ async def _handle_utterance(websocket: WebSocket, text: str, msg: dict, history:
 
     switched_session: int | None = None
     for cmd in commands:                    # ③ Unity 명령 먼저
-        await websocket.send_json(cmd)
+        await send(cmd)
         # find_session이 경기를 바꾸면 loadSession 명령에 새 세션이 실린다 → 기억해 둔다.
         if cmd.get("name") == "loadSession":
             switched_session = (cmd.get("args") or {}).get("session_key", switched_session)
-    await websocket.send_json(               # ④ 자막용 텍스트
-        {"type": "assistant_text", "text": reply}
-    )
+    await send({"type": "assistant_text", "text": reply})   # ④ 자막용 텍스트
     audio_b64 = await _synthesize_safe(reply)  # ⑤ TTS 오디오(가능하면)
     if audio_b64 is not None:
-        await websocket.send_json(
-            {"type": "tts_audio", "format": "wav", "data": audio_b64}
-        )
+        await send({"type": "tts_audio", "format": "wav", "data": audio_b64})
     return switched_session
 
 
 @app.websocket("/ws")
 async def ws(websocket: WebSocket):
     await websocket.accept()
+
+    # 이 연결의 모든 송신을 하나의 Lock으로 직렬화한다.
+    # 메인 루프(답변 전송)와 watcher 태스크(능동 안내)가 동시에 같은 websocket에 쓰면
+    # ASGI 프레임이 깨질 수 있으므로, 항상 이 send()로만 보낸다(직접 send_json 금지).
+    send_lock = asyncio.Lock()
+
+    async def send(payload: dict) -> None:
+        async with send_lock:
+            await websocket.send_json(payload)
+
     history: list = []
     # 이 연결에서 마지막으로 보던 경기. 서버가 '현재 경기'를 직접 기억해,
     #   ① 음성 find_session 전환이 이후 발화에도 유지되고
@@ -157,14 +164,14 @@ async def ws(websocket: WebSocket):
 
     async def _announce(driver_number: int, message: str) -> None:
         """watcher가 부르는 콜백 — 그 차 강조 + 안내 음성(TTS). 둘 다 기존 Unity 처리 재사용."""
-        await websocket.send_json(
+        await send(
             {"type": "command", "name": "highlightDriver", "args": {"driver_number": driver_number}}
         )
         audio_b64 = await _synthesize_safe(message)
         if audio_b64 is not None:
-            await websocket.send_json({"type": "tts_announce", "format": "wav", "data": audio_b64})
+            await send({"type": "tts_announce", "format": "wav", "data": audio_b64})
         else:   # TTS 꺼짐/실패 시 자막만
-            await websocket.send_json({"type": "assistant_text", "text": message})
+            await send({"type": "assistant_text", "text": message})
 
     try:
         while True:
@@ -183,6 +190,7 @@ async def ws(websocket: WebSocket):
             if mtype == "replay_state":
                 latest_state["v"] = msg
                 if settings.predict_watcher_enabled and watcher_task is None:
+                    logger.info("[hb] 첫 replay_state 수신 → watcher 태스크 시작")
                     watcher_task = asyncio.create_task(
                         watch(lambda: latest_state["v"], _announce)
                     )
@@ -196,9 +204,7 @@ async def ws(websocket: WebSocket):
                     audio_b64 = await _synthesize_safe(say)
                     if audio_b64 is not None:
                         # 능동 안내 전용 타입 → Unity가 "답변 재생 중이면 건너뛰기"로 처리
-                        await websocket.send_json(
-                            {"type": "tts_announce", "format": "wav", "data": audio_b64}
-                        )
+                        await send({"type": "tts_announce", "format": "wav", "data": audio_b64})
                 continue
 
             # 입력 정규화: 텍스트/음성 어느 쪽이 와도 text 한 줄로 만든다.
@@ -207,7 +213,7 @@ async def ws(websocket: WebSocket):
             elif mtype == "audio_utterance":
                 text = await _transcribe_safe(msg.get("data", ""))
                 if text:                     # 무엇으로 인식됐는지 Unity에 회신(자막 확인)
-                    await websocket.send_json({"type": "transcript", "text": text})
+                    await send({"type": "transcript", "text": text})
             else:
                 continue
 
@@ -216,7 +222,7 @@ async def ws(websocket: WebSocket):
 
             # 한 발화 처리 중 오류가 나도 연결·대화는 유지한다(우아한 실패).
             try:
-                switched = await _handle_utterance(websocket, text, msg, history)
+                switched = await _handle_utterance(send, text, msg, history)
                 if switched is not None:      # 음성으로 경기를 바꿨으면 연결 상태에 반영
                     session_key = switched
             except WebSocketDisconnect:
@@ -224,7 +230,7 @@ async def ws(websocket: WebSocket):
             except Exception:
                 logger.exception("발화 처리 실패")
                 try:
-                    await websocket.send_json({
+                    await send({
                         "type": "assistant_text",
                         "text": "죄송해요, 잠시 문제가 있었어요. 다시 말씀해 주세요.",
                     })
