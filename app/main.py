@@ -92,16 +92,35 @@ def _normalize_ko_numbers(text: str) -> str:
     return re.sub(r"(\d+)\s*(번|등|랩)", lambda m: _sino(int(m.group(1))) + m.group(2), text)
 
 
+# TTS 결과(base64 wav) 캐시 — 같은 문장은 다시 합성하지 않는다.
+# 능동 안내("N번, 곧 추월할 것 같아요!")는 문구 패턴이 정해져 있어, 처음 한 번만 합성하면
+# 이후 같은 안내는 즉시 재생된다(음성 지연 체감 감소). 최근 N개만 유지(메모리 상한).
+from collections import OrderedDict
+
+_TTS_CACHE: "OrderedDict[str, str]" = OrderedDict()
+_TTS_CACHE_MAX = 64
+
+
 async def _synthesize_safe(text: str) -> str | None:
-    """텍스트 → base64 wav. TTS가 꺼져있거나 실패하면 None(텍스트만 전송)."""
+    """텍스트 → base64 wav. TTS가 꺼져있거나 실패하면 None(텍스트만 전송). 같은 문장은 캐시."""
     if not settings.tts_enabled:
         return None
+    norm = _normalize_ko_numbers(text)   # '7번'→'칠 번' 정규화된 최종 문장이 캐시 키
+    cached = _TTS_CACHE.get(norm)
+    if cached is not None:
+        _TTS_CACHE.move_to_end(norm)     # LRU: 최근 사용으로 갱신
+        return cached
     try:
-        audio = await tts.synthesize(_normalize_ko_numbers(text))
-        return base64.b64encode(audio).decode("ascii")
+        audio = await tts.synthesize(norm)
+        b64 = base64.b64encode(audio).decode("ascii")
     except Exception:
         logger.exception("TTS 합성 실패 — 텍스트만 전송")
         return None
+    _TTS_CACHE[norm] = b64
+    _TTS_CACHE.move_to_end(norm)
+    if len(_TTS_CACHE) > _TTS_CACHE_MAX:
+        _TTS_CACHE.popitem(last=False)   # 가장 오래된 것 제거
+    return b64
 
 
 async def _handle_utterance(send, text: str, msg: dict, history: list) -> int | None:
@@ -162,11 +181,17 @@ async def ws(websocket: WebSocket):
     latest_state: dict = {"v": None}
     watcher_task: asyncio.Task | None = None
 
-    async def _announce(driver_number: int, message: str) -> None:
-        """watcher가 부르는 콜백 — 그 차 강조 + 안내 음성(TTS). 둘 다 기존 Unity 처리 재사용."""
-        await send(
-            {"type": "command", "name": "highlightDriver", "args": {"driver_number": driver_number}}
-        )
+    async def _announce(driver_number: int, probability: float, message: str) -> None:
+        """watcher가 부르는 콜백 — 그 차에 예측 리본 표시 + 안내 음성(TTS).
+
+        highlightDriver(선택 강조) 대신 predictOvertake를 보낸다: 능동 안내는 수동 예측이라
+        사용자의 '선택 차량(이 선수)'을 가로채면 안 되고, 리본이 예측 표현에 더 맞다.
+        probability(0~1)는 Unity가 리본 강도로 사용한다.
+        """
+        await send({
+            "type": "command", "name": "predictOvertake",
+            "args": {"driver_number": driver_number, "probability": round(probability, 4)},
+        })
         audio_b64 = await _synthesize_safe(message)
         if audio_b64 is not None:
             await send({"type": "tts_announce", "format": "wav", "data": audio_b64})

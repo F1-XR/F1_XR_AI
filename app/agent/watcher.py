@@ -55,12 +55,13 @@ async def _battle_drivers(
 
 async def watch(
     get_state: Callable[[], dict | None],
-    announce: Callable[[int, str], Awaitable[None]],
+    announce: Callable[[int, float, str], Awaitable[None]],
 ) -> None:
     """예측형 능동 안내 루프.
 
     get_state(): 최신 replay_state dict(없으면 None). heartbeat로 갱신됨.
-    announce(driver_number, message): 강조 + TTS 안내를 실제로 보내는 콜백(main이 주입).
+    announce(driver_number, probability, message): 리본 표시 + TTS 안내를 실제로 보내는
+        콜백(main이 주입). probability(0~1)는 Unity가 리본 강도로 쓴다.
     """
     # 예측 모듈은 lightgbm 필요 → 지연 import(미설치여도 서버는 뜬다).
     from ..ml import features as _feat
@@ -106,7 +107,7 @@ async def watch(
             last_fire = now
             announced[dn] = now
             logger.info("[watcher] 능동 안내: %s번 추월확률 %.2f", dn, prob)
-            await announce(dn, f"{dn}번, 곧 추월할 것 같아요!")
+            await announce(dn, prob, f"{dn}번, 곧 추월할 것 같아요!")
         except asyncio.CancelledError:
             raise
         except Exception:
