@@ -276,6 +276,19 @@ async def predict_overtake(driver_number: int) -> dict:
     }
 
 
+# ────────────────────────────── 시점 전환 ──────────────────────────────
+
+@tool
+def toggle_drone_view(on: bool) -> str:
+    """드론(공중) 시점을 켜거나 끈다.
+    "드론으로 봐", "공중에서 봐", "위에서 전체 보여줘" → on=True.
+    "드론 꺼", "원래 시점으로" → on=False.
+    주의: 특정 선수를 그냥 보고 싶은 거면(누구야/어디 있어) 이 도구가 아니라 highlight_driver를 쓴다.
+    드론은 화면 전체가 바뀌는 '큰 시점 전환'이라, 사용자가 드론/공중을 명시적으로 요청할 때만 쓴다."""
+    emit_command("droneView", on=on)
+    return "드론 시점으로 전환했어요." if on else "원래 시점으로 돌아왔어요."
+
+
 # 능동형 pointOutMoment는 사용자 발화가 아니라 서버 백그라운드 감시 루프가
 # 발동한다(app/agent/watcher.py, 확장 단계). 도구 목록에는 넣지 않는다.
 
@@ -289,4 +302,5 @@ ALL_TOOLS = [
     control_replay,
     jump_to_event,
     predict_overtake,
+    toggle_drone_view,
 ]
