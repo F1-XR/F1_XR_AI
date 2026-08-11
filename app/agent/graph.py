@@ -12,6 +12,7 @@
 """
 from __future__ import annotations
 
+import json
 import logging
 
 from langchain_openai import ChatOpenAI
@@ -43,6 +44,9 @@ SYSTEM_PROMPT = """당신은 F1을 처음 보는 사람을 위한 친절한 관�
 - 선수를 언급하면 필요 시 highlight_driver로 화면에서 함께 짚어주세요.
 - "천천히 다시 보여줘"처럼 여러 동작이 섞인 요청은 도구를 순서대로 여러 번 호출하세요.
 - 전문용어가 나오면 먼저 explain_concept로 뜻을 풀어주세요.
+- ⚠️ 매우 중요: 도구(get_driver_info 등)를 호출했다면, 그 결과를 바탕으로 **반드시 한국어 최종 문장**으로 답하세요.
+  도구만 부르고 아무 말 없이 끝내지 마세요. 선수를 조회했으면 이름을 먼저 말하고
+  (예: "이 선수는 막스 베르스타펜 선수예요"), 세부 정보는 화면 표시로 넘겨도 됩니다.
 """
 
 
@@ -105,6 +109,69 @@ def get_agent():
     return _agent
 
 
+def _msg_text(content) -> str:
+    """LangChain 메시지 content(문자열 또는 content-block 리스트)를 순수 텍스트로 만든다."""
+    if isinstance(content, list):
+        content = "".join(
+            part.get("text", "") if isinstance(part, dict) else str(part)
+            for part in content
+        )
+    return (content or "").strip()
+
+
+def _current_turn(messages: list) -> list:
+    """이번 발화 부분만(마지막 user 메시지 이후) 잘라낸다.
+
+    run_agent는 history(이전 대화)를 함께 모델에 넘긴다. 그래서 결과 메시지를 끝에서부터
+    전부 훑으면 '이번 답'이 비었을 때 이전 턴의 답변을 잘못 집을 수 있다(→ 같은 답 반복).
+    반드시 이번 턴 구간만 본다.
+    """
+    start = 0
+    for i, m in enumerate(messages):
+        if getattr(m, "type", None) == "human":
+            start = i + 1
+    return messages[start:]
+
+
+def _extract_reply(messages: list) -> str:
+    """이번 턴에서 '내용이 있는' AI 메시지 텍스트를 고른다.
+
+    create_react_agent가 도구 호출로 끝나면 마지막 메시지 content가 빈 문자열일 수 있다
+    (특히 로컬/OSS 모델). 그래서 맨 끝만 보지 않고, 이번 턴 구간을 뒤에서부터 훑어
+    비지 않은 AI 텍스트를 찾는다.
+    """
+    for m in reversed(_current_turn(messages)):
+        if getattr(m, "type", None) == "ai":
+            text = _msg_text(m.content)
+            if text:
+                return text
+    return ""
+
+
+def _salvage_from_tools(messages: list) -> str | None:
+    """LLM이 최종 문장을 못 냈을 때, 조회 도구 결과로 최소한의 답을 복구한다.
+
+    지금은 get_driver_info(선수 정보) 결과를 처리해 '이 선수 누구?' 류의 빈 답을 메운다.
+    (모델이 도구로 이름을 이미 조회했으므로, 그 값으로 한 문장을 만들어준다.)
+    """
+    for m in reversed(_current_turn(messages)):   # 이번 턴 도구 결과만(이전 턴 오염 방지)
+        if getattr(m, "type", None) != "tool":
+            continue
+        raw = m.content
+        try:
+            data = json.loads(raw) if isinstance(raw, str) else raw
+        except (ValueError, TypeError):
+            continue
+        if isinstance(data, dict) and data.get("name"):   # get_driver_info 반환 형태
+            who = data["name"]
+            team = data.get("team")
+            num = data.get("number")
+            head = f"{num}번은" if num else "이 선수는"
+            tail = f" {team} 소속이에요." if team else ""
+            return f"{head} {who} 선수예요.{tail}"
+    return None
+
+
 async def run_agent(
     text: str,
     session_key: int | None = None,
@@ -132,9 +199,23 @@ async def run_agent(
     messages: list = [("system", system)] + list(history or []) + [("user", text)]
     try:
         result = await get_agent().ainvoke({"messages": messages})
-        reply = result["messages"][-1].content
-        if not isinstance(reply, str):
-            reply = str(reply)
+
+        # [임시 진단] 모델이 어떤 도구를 부르고 무엇을 반환했는지, 최종 텍스트가 비었는지 확인용.
+        # 원인 파악 후 제거 예정.
+        for _m in result["messages"]:
+            _t = getattr(_m, "type", "?")
+            _tc = getattr(_m, "tool_calls", None)
+            _names = [c.get("name") for c in _tc] if _tc else None
+            _prev = (_msg_text(_m.content) if _t != "tool" else str(_m.content))[:140]
+            logger.info("[chain] %-5s tool_calls=%s | %s", _t, _names, _prev)
+
+        reply = _extract_reply(result["messages"])
+        if not reply:
+            # 로컬 모델이 도구 호출만 하고 최종 텍스트를 안 낸 경우 방어:
+            # 도구가 조회한 값(예: 선수 정보)으로 최소 답을 복구하고, 그래도 없으면 안내한다.
+            reply = _salvage_from_tools(result["messages"]) or \
+                "화면에 표시했어요. 더 궁금한 점 있으신가요?"
+            logger.warning("LLM 최종 텍스트가 비어 폴백 사용: %r", reply)
         commands = drain()              # 도구가 쌓아둔 Unity 명령 회수
         return reply, commands
     except Exception as exc:

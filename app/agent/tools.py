@@ -171,6 +171,8 @@ async def explain_why(driver_number: int) -> dict:
     리플레이 현재 시각(at_time) 이하의 데이터만 보므로 아직 안 지난 결과는 스포일러하지 않는다."""
     session = current_session()
     cutoff = current_time()   # 리플레이 현재 시각(ISO). None이면 전체(=최신).
+    # 실제 선수 이름을 데이터에서 가져온다 → 모델이 이름을 지어내지(할루시네이션) 못하게.
+    driver = await openf1.get_driver(session, driver_number)
     pit = await openf1.get_pit(session, driver_number)
     stints = await openf1.get_stints(session, driver_number)
     intervals = await openf1.get_intervals(session, driver_number)
@@ -189,11 +191,14 @@ async def explain_why(driver_number: int) -> dict:
 
     return {
         "driver_number": driver_number,
+        "driver_name": (driver or {}).get("full_name"),
+        "team": (driver or {}).get("team_name"),
         "pit_stops": pit[-3:] if pit else [],
         "tire_stints": stints[-3:] if stints else [],
         "recent_gap": intervals[-1] if intervals else None,
         "at_time": cutoff,
         "hint": "타이어 스틴트가 길면 노후화로 피트인, 갭이 좁혀지면 추월 압박일 수 있음.",
+        "note": "driver_name 을 실제 선수 이름으로 그대로 쓰세요. 이름을 추측·변경하지 마세요.",
     }
 
 
@@ -257,6 +262,7 @@ async def predict_overtake(driver_number: int) -> dict:
     현재 리플레이 시각(at_time) 이하 데이터만 보므로 스포일러하지 않는다."""
     session = current_session()
     cutoff = current_time()
+    driver = await openf1.get_driver(session, driver_number)   # 이름 근거(할루시네이션 방지)
     try:
         from ..ml import features as _feat
         from ..ml import predict as _pred
@@ -268,11 +274,13 @@ async def predict_overtake(driver_number: int) -> dict:
 
     return {
         "driver_number": driver_number,
+        "driver_name": (driver or {}).get("full_name"),
+        "team": (driver or {}).get("team_name"),
         "overtake_probability": probs.get("overtake_probability"),
         "position_gain_probability": probs.get("position_gain_probability"),
         "position_loss_probability": probs.get("position_loss_probability"),
         "at_time": cutoff,
-        "note": "30초 내 확률(예측치). 결과가 정해진 게 아니라 데이터 기반 추정.",
+        "note": "30초 내 확률(예측치). driver_name 을 그대로 쓰고 이름을 지어내지 마세요.",
     }
 
 
