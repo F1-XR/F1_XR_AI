@@ -284,6 +284,87 @@ async def predict_overtake(driver_number: int) -> dict:
     }
 
 
+@tool
+async def show_battle_context(driver_number: int) -> dict:
+    """지정 드라이버와 '바로 앞차' 사이의 배틀 상황(간격·추세·DRS)을 계산하고,
+    두 차 사이에 Gap Line + 배지("0.8s · Closing · DRS")를 화면에 표시하도록 Unity에 명령한다.
+    "지금 앞차랑 배틀 상황 보여줘", "얼마나 붙었어?", "왜 추월 압박이야?"처럼
+    두 차의 근접 상황을 공간적으로 보여줄 때 사용. 현재 시각(at_time) 이하만 본다(스포일러 방지)."""
+    from ..ml.features import _before, _num, _seconds_between, _iso_minus
+
+    session = current_session()
+    cutoff = current_time()
+
+    # 1) 최신 순위 → subject 순위와 '바로 앞차'(target) 찾기 (get_race_status와 동일 방식)
+    latest: dict[int, tuple] = {}   # driver_number -> (date, position)
+    for p in _before(await openf1.get_positions(session), cutoff):
+        dn, pos, d = p.get("driver_number"), p.get("position"), p.get("date")
+        if dn is None or pos is None:
+            continue
+        prev = latest.get(dn)
+        if prev is None or (d or "") >= (prev[0] or ""):
+            latest[dn] = (d, pos)
+    subj = latest.get(driver_number)
+    if subj is None:
+        return {"shown": False, "note": f"{driver_number}번의 위치 정보를 찾지 못했어요."}
+    subj_pos = subj[1]
+    if subj_pos <= 1:
+        return {"shown": False, "note": "지금 선두라 앞에 배틀 상대가 없어요."}
+    target = next((dn for dn, (d, pos) in latest.items() if pos == subj_pos - 1), None)
+    if target is None:
+        return {"shown": False, "note": "앞차를 특정하지 못했어요."}
+
+    # 2) 간격(초)과 추세 — subject의 intervals (음수 변화 = 좁혀짐 = closing)
+    iv = _before(await openf1.get_intervals(session, driver_number), cutoff)
+    gap = _num(iv[-1].get("interval")) if iv else None
+    trend = "stable"
+    if iv and gap is not None and iv[-1].get("date"):
+        for r in reversed(iv[:-1]):
+            if r.get("date") and _seconds_between(r["date"], iv[-1]["date"]) >= 3:
+                gp = _num(r.get("interval"))
+                if gp is not None:
+                    if gap < gp - 0.05:
+                        trend = "closing"
+                    elif gap > gp + 0.05:
+                        trend = "opening"
+                break
+
+    # 3) DRS — subject의 car_data 창(현재 시각 근처). drs 코드 10/12/14 = 작동 중.
+    drs = False
+    if cutoff:
+        start = _iso_minus(cutoff, 4)
+        if start:
+            cd = [c for c in await openf1.get_car_data_window(session, driver_number, start, cutoff)
+                  if c.get("date") and c["date"] <= cutoff]
+            if cd:
+                drs = cd[-1].get("drs") in (10, 12, 14)
+
+    # 4) confidence(간단 휴리스틱): 가깝고 좁혀질수록 높게
+    conf = 0.0
+    if gap is not None:
+        conf = max(0.0, min(1.0, (1.2 - gap) * (0.7 if trend == "closing" else 0.4)))
+
+    emit_command(
+        "showBattleContext",
+        subject_driver=driver_number,
+        target_driver=target,
+        gap_seconds=round(gap, 2) if gap is not None else 0.0,
+        trend=trend,
+        drs=bool(drs),
+        confidence=round(conf, 2),
+        reason="앞차와의 간격·추세·DRS 기반",
+    )
+    return {
+        "shown": True,
+        "subject_driver": driver_number,
+        "target_driver": target,
+        "gap_seconds": round(gap, 2) if gap is not None else None,
+        "trend": trend,
+        "drs": bool(drs),
+        "note": "두 차 사이에 Gap Line과 배지를 표시했어요. 이 수치를 바탕으로 한두 문장으로 짧게 설명하세요.",
+    }
+
+
 # ────────────────────────────── 시점 전환 ──────────────────────────────
 
 @tool
@@ -310,5 +391,6 @@ ALL_TOOLS = [
     control_replay,
     jump_to_event,
     predict_overtake,
+    show_battle_context,
     toggle_drone_view,
 ]

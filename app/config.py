@@ -43,6 +43,10 @@ class Settings(BaseSettings):
     watcher_threshold: float = 0.2     # 이 확률 이상이면 안내(0~1)
     watcher_period_sec: float = 3.0    # 감시 주기(초)
     watcher_cooldown_sec: float = 15.0 # 연속 안내 최소 간격(초)
+    # 능동 안내 오탐 평가용 로그. 안내할 때마다 예측(차량·시각·확률)을 jsonl로 적재하고,
+    # 나중에 scripts/eval_watcher.py 로 실제 추월 여부와 대조해 오탐률·Precision@K를 집계한다.
+    watcher_eval_enabled: bool = True
+    watcher_eval_log: str = "logs/watcher_eval.jsonl"
 
     # 기본 세션 (데모용 리플레이) — 2025 아부다비 GP(Yas Marina) Race
     # 실제 값은 .env 의 DEFAULT_SESSION_KEY 가 덮어쓴다.

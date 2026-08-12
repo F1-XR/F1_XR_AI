@@ -21,6 +21,7 @@ from typing import Awaitable, Callable
 
 from ..config import settings
 from ..data import openf1
+from . import watcher_eval
 
 logger = logging.getLogger(__name__)
 
@@ -107,6 +108,8 @@ async def watch(
             last_fire = now
             announced[dn] = now
             logger.info("[watcher] 능동 안내: %s번 추월확률 %.2f", dn, prob)
+            # 오탐 평가용: 이 예측(차량·시각·확률)을 기록 → 나중에 실제 추월 여부와 대조.
+            watcher_eval.log_prediction(session, cutoff, dn, prob)
             await announce(dn, prob, f"{dn}번, 곧 추월할 것 같아요!")
         except asyncio.CancelledError:
             raise

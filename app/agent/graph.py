@@ -12,6 +12,7 @@
 """
 from __future__ import annotations
 
+import ast
 import json
 import logging
 
@@ -42,6 +43,7 @@ SYSTEM_PROMPT = """당신은 F1을 처음 보는 사람을 위한 친절한 관�
 - '1등·2등'은 순위(position)이고 '1번·16번'은 차량 번호(driver_number)입니다. 둘을 절대 혼동하지 마세요.
 - 선수는 약칭(VER)이 아니라 한국어 전체 이름(예: 막스 베르스타펜)으로 말하세요. 순위는 도구가 준 standings 값을 그대로 쓰고 지어내지 마세요.
 - 선수를 언급하면 필요 시 highlight_driver로 화면에서 함께 짚어주세요.
+- 두 차의 근접·추월 압박(간격/추세/DRS)을 물으면 show_battle_context로 두 차 사이에 공간 표시(Gap Line+배지)를 함께 띄우세요.
 - "천천히 다시 보여줘"처럼 여러 동작이 섞인 요청은 도구를 순서대로 여러 번 호출하세요.
 - 전문용어가 나오면 먼저 explain_concept로 뜻을 풀어주세요.
 - ⚠️ 매우 중요: 도구(get_driver_info 등)를 호출했다면, 그 결과를 바탕으로 **반드시 한국어 최종 문장**으로 답하세요.
@@ -158,10 +160,18 @@ def _salvage_from_tools(messages: list) -> str | None:
         if getattr(m, "type", None) != "tool":
             continue
         raw = m.content
-        try:
-            data = json.loads(raw) if isinstance(raw, str) else raw
-        except (ValueError, TypeError):
-            continue
+        if isinstance(raw, str):
+            data = None
+            # LangChain은 dict 도구결과를 JSON 또는 파이썬 repr(작은따옴표) 문자열로 담는다.
+            # 둘 다 시도한다(repr는 json.loads로 못 읽으므로 ast.literal_eval 폴백).
+            for _parse in (json.loads, ast.literal_eval):
+                try:
+                    data = _parse(raw)
+                    break
+                except (ValueError, TypeError, SyntaxError):
+                    continue
+        else:
+            data = raw
         if isinstance(data, dict) and data.get("name"):   # get_driver_info 반환 형태
             who = data["name"]
             team = data.get("team")
