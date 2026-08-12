@@ -165,10 +165,18 @@ async def ws(websocket: WebSocket):
     # 메인 루프(답변 전송)와 watcher 태스크(능동 안내)가 동시에 같은 websocket에 쓰면
     # ASGI 프레임이 깨질 수 있으므로, 항상 이 send()로만 보낸다(직접 send_json 금지).
     send_lock = asyncio.Lock()
+    conn_open = {"v": True}   # 연결 생존 플래그 — 끊긴 뒤 전송 시도(watcher 스팸)를 막는다.
 
     async def send(payload: dict) -> None:
+        if not conn_open["v"]:
+            return
         async with send_lock:
-            await websocket.send_json(payload)
+            try:
+                await websocket.send_json(payload)
+            except Exception:
+                # 클라이언트가 끊긴 뒤엔 조용히 중단. watcher가 죽은 소켓에 계속 쏘며
+                # 예외를 스팸하는 것을 막는다(실제 연결 정리는 메인 루프 finally가 담당).
+                conn_open["v"] = False
 
     history: list = []
     # 이 연결에서 마지막으로 보던 경기. 서버가 '현재 경기'를 직접 기억해,

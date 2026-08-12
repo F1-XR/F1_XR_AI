@@ -15,6 +15,9 @@ class Settings(BaseSettings):
     # 응답 토큰 상한. 답변은 음성으로 읽어주므로 짧게 유지(장황 방지). 추론형 모델은
     # '생각 토큰'도 여기 포함되니 너무 낮으면 답이 잘린다 → 320 안팎 권장. .env: LLM_MAX_TOKENS
     llm_max_tokens: int = 320
+    # 로컬 모델이 도구 호출 후 최종 텍스트를 비우는 경우, 한 번 더 "최종 문장만" 강제 재요청.
+    # 빈 답일 때만 발동(정상 답이면 추가 호출 없음). 지연이 부담되면 .env 로 끈다.
+    empty_reply_retry: bool = True
 
     # 음성 공급자 — .env 의 STT_PROVIDER/TTS_PROVIDER 로 교체(모델 교체 시 여기만 바꿈)
     stt_provider: str = "whisper"    # whisper | voxtral

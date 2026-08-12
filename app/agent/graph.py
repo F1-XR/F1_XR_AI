@@ -150,35 +150,61 @@ def _extract_reply(messages: list) -> str:
     return ""
 
 
-def _salvage_from_tools(messages: list) -> str | None:
-    """LLM이 최종 문장을 못 냈을 때, 조회 도구 결과로 최소한의 답을 복구한다.
+def _parse_tool_data(raw):
+    """도구 메시지 content를 dict로 파싱(가능하면). LangChain은 dict 결과를
+    JSON 또는 파이썬 repr(작은따옴표) 문자열로 담으므로 둘 다 시도한다."""
+    if isinstance(raw, dict):
+        return raw
+    if isinstance(raw, str):
+        for _parse in (json.loads, ast.literal_eval):
+            try:
+                v = _parse(raw)
+                return v if isinstance(v, dict) else None
+            except (ValueError, TypeError, SyntaxError):
+                continue
+    return None
 
-    지금은 get_driver_info(선수 정보) 결과를 처리해 '이 선수 누구?' 류의 빈 답을 메운다.
-    (모델이 도구로 이름을 이미 조회했으므로, 그 값으로 한 문장을 만들어준다.)
+
+def _salvage_from_tools(messages: list) -> str | None:
+    """LLM이 최종 문장을 못 냈을 때, 이번 턴 도구 결과로 최소한의 답을 복구한다.
+
+    우선순위:
+      1) get_driver_info(선수 정보) 결과 → "N번은 OOO 선수예요." (이름 우선)
+      2) 명령형 도구가 돌려준 확인 문구(문자열) → 그대로 사용
+         (예: "드론 시점으로 전환했어요", "16번 선수를 화면에서 강조했어요")
     """
-    for m in reversed(_current_turn(messages)):   # 이번 턴 도구 결과만(이전 턴 오염 방지)
+    turn = _current_turn(messages)   # 이번 턴 도구 결과만(이전 턴 오염 방지)
+
+    # 1) 데이터 도구(dict) — 선수 정보(이름)나 배틀 상황(간격/추세)로 한 문장 복구
+    _trend_ko = {
+        "closing": " 간격이 점점 좁혀지는 중이에요.",
+        "opening": " 간격이 벌어지는 중이에요.",
+        "stable": "",
+    }
+    for m in reversed(turn):
         if getattr(m, "type", None) != "tool":
             continue
-        raw = m.content
-        if isinstance(raw, str):
-            data = None
-            # LangChain은 dict 도구결과를 JSON 또는 파이썬 repr(작은따옴표) 문자열로 담는다.
-            # 둘 다 시도한다(repr는 json.loads로 못 읽으므로 ast.literal_eval 폴백).
-            for _parse in (json.loads, ast.literal_eval):
-                try:
-                    data = _parse(raw)
-                    break
-                except (ValueError, TypeError, SyntaxError):
-                    continue
-        else:
-            data = raw
-        if isinstance(data, dict) and data.get("name"):   # get_driver_info 반환 형태
-            who = data["name"]
-            team = data.get("team")
-            num = data.get("number")
+        data = _parse_tool_data(m.content)
+        if not isinstance(data, dict):
+            continue
+        if data.get("name"):                       # get_driver_info
+            who, team, num = data["name"], data.get("team"), data.get("number")
             head = f"{num}번은" if num else "이 선수는"
             tail = f" {team} 소속이에요." if team else ""
             return f"{head} {who} 선수예요.{tail}"
+        if data.get("gap_seconds") is not None:    # show_battle_context
+            gap = data["gap_seconds"]
+            drs = " DRS도 열렸어요." if data.get("drs") else ""
+            return (f"앞차와 {gap}초 차이예요.{_trend_ko.get(data.get('trend'), '')}"
+                    f"{drs} 두 차 사이를 화면에 표시했어요.")
+
+    # 2) 명령형 도구의 확인 문구(dict가 아닌 순수 문자열) — 가장 최근 것
+    for m in reversed(turn):
+        if getattr(m, "type", None) != "tool":
+            continue
+        raw = m.content
+        if isinstance(raw, str) and raw.strip() and _parse_tool_data(raw) is None:
+            return raw.strip()
     return None
 
 
@@ -217,12 +243,28 @@ async def run_agent(
             _tc = getattr(_m, "tool_calls", None)
             _names = [c.get("name") for c in _tc] if _tc else None
             _prev = (_msg_text(_m.content) if _t != "tool" else str(_m.content))[:140]
-            logger.info("[chain] %-5s tool_calls=%s | %s", _t, _names, _prev)
+            logger.warning("[chain] %-5s tool_calls=%s | %s", _t, _names, _prev)
 
         reply = _extract_reply(result["messages"])
+
+        # 1차 방어(재요청): 도구만 부르고 최종 텍스트를 비웠으면, 한 번 더
+        # "도구 그만, 지금까지 결과로 한국어 1~2문장 답만" 강제해 자연스러운 답을 유도한다.
+        # (빈 답일 때만 1회 — 정상 답이면 추가 호출 없음.)
+        if not reply and settings.empty_reply_retry:
+            try:
+                retry_msgs = list(result["messages"]) + [(
+                    "user",
+                    "도구를 더 부르지 말고, 지금까지 얻은 정보만으로 "
+                    "직전 질문에 한국어 1~2문장으로 답만 말해줘.",
+                )]
+                retry = await get_agent().ainvoke({"messages": retry_msgs})
+                reply = _extract_reply(retry["messages"])
+                logger.warning("[재요청] 결과: %s", f"복구됨: {reply!r}" if reply else "재요청도 빈 답")
+            except Exception:
+                logger.exception("[재요청] 실패(무시하고 폴백)")
+
+        # 2차 방어(복구): 재요청도 비면 도구 결과로 최소 답 복구, 그래도 없으면 안내.
         if not reply:
-            # 로컬 모델이 도구 호출만 하고 최종 텍스트를 안 낸 경우 방어:
-            # 도구가 조회한 값(예: 선수 정보)으로 최소 답을 복구하고, 그래도 없으면 안내한다.
             reply = _salvage_from_tools(result["messages"]) or \
                 "화면에 표시했어요. 더 궁금한 점 있으신가요?"
             logger.warning("LLM 최종 텍스트가 비어 폴백 사용: %r", reply)
