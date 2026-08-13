@@ -48,7 +48,7 @@ async def main() -> None:
     # ② 에이전트
     print("\n② 에이전트 응답 생성 중…")
     try:
-        reply, commands = await run_agent(text=text, session_key=None, at_time=None, history=[])
+        reply, commands, _ = await run_agent(text=text, session_key=None, at_time=None, history=[])
     except Exception as exc:
         print(f"❌ 에이전트 실패: {type(exc).__name__}: {exc}")
         print("→ .env 의 OPENAI_API_KEY / LLM_MODEL 을 확인하세요.")

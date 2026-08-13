@@ -12,13 +12,14 @@ from __future__ import annotations
 
 import json
 import logging
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from langchain_core.tools import tool
 
 from ..data import openf1
 from .commands import emit_command
-from .context import current_session, current_time, set_session
+from .context import current_recent_overtake, current_session, current_time, set_session
 
 logger = logging.getLogger(__name__)
 
@@ -226,9 +227,14 @@ def control_replay(action: str, value: float | None = None) -> str:
 @tool
 async def jump_to_event(event_type: str) -> str:
     """의미 있는 장면으로 리플레이를 점프시킨다. event_type은
-    'first_pit' | 'safety_car' | 'yellow_flag' 등. 이벤트의 시각을 데이터에서 찾아
-    그 지점으로 Seek 명령을 보낸다. "첫 피트스톱 보여줘", "사고 장면으로"에 사용한다."""
+    'first_pit' | 'first_overtake' | 'first_overtake_before' | 'safety_car' | 'yellow_flag' 등.
+    이벤트의 시각을 데이터에서 찾아 그 지점으로 Seek 명령을 보낸다.
+    "첫 피트스톱 보여줘" → first_pit.
+    "첫 추월 장면으로 가줘" → first_overtake.
+    "그 추월 장면 직전으로 돌아가" → first_overtake_before.
+    "사고 장면으로" → safety_car 또는 yellow_flag."""
     session = current_session()
+    cutoff = current_time()
     target_time = None
 
     if event_type == "first_pit":
@@ -236,6 +242,26 @@ async def jump_to_event(event_type: str) -> str:
         pit = [p for p in pit if p.get("date")]
         if pit:
             target_time = min(pit, key=lambda p: p["date"])["date"]
+    elif event_type in ("first_overtake", "first_overtake_before"):
+        recent = current_recent_overtake()
+        if event_type == "first_overtake_before" and recent and recent.get("event_time"):
+            target_time = recent["event_time"]
+        else:
+            positions = [
+                p for p in await openf1.get_positions(session)
+                if p.get("date") and p.get("driver_number") is not None and p.get("position") is not None
+            ]
+            if cutoff:
+                positions = [p for p in positions if p["date"] <= cutoff]
+            positions.sort(key=lambda p: p["date"])
+            prev_pos: dict[int, int] = {}
+            for p in positions:
+                dn, pos = int(p["driver_number"]), int(p["position"])
+                before = prev_pos.get(dn)
+                if before is not None and pos < before:
+                    target_time = p["date"]
+                    break
+                prev_pos[dn] = pos
     else:
         rc = await openf1.get_race_control(session)
         want = {"safety_car": "SafetyCar", "yellow_flag": "Flag"}.get(event_type)
@@ -247,9 +273,21 @@ async def jump_to_event(event_type: str) -> str:
     if not target_time:
         return f"'{event_type}' 장면을 데이터에서 찾지 못했어요."
 
+    if event_type.endswith("_before"):
+        target_time = seek_before(target_time, 5.0)
+
     # 절대 시각(ISO) → Unity가 리플레이 상대시간으로 매핑해 Seek
     emit_command("controlReplay", action="seek", value=target_time)
     return f"'{event_type}' 장면({target_time})으로 이동했어요."
+
+
+def seek_before(iso: str, seconds: float = 5.0) -> str:
+    """ISO 시각보다 seconds초 앞선 시각. 실패하면 원본을 돌려준다."""
+    try:
+        t = datetime.fromisoformat(iso.replace("Z", "+00:00"))
+        return (t - timedelta(seconds=seconds)).isoformat()
+    except (ValueError, AttributeError):
+        return iso
 
 
 # ────────────────────────────── 예측형 ──────────────────────────────

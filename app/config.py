@@ -13,11 +13,23 @@ class Settings(BaseSettings):
     # 로컬/호스팅 모델(예: Gemma 4)로 바꿀 때 .env 의 LLM_BASE_URL 로 지정.
     llm_base_url: str = ""
     # 응답 토큰 상한. 답변은 음성으로 읽어주므로 짧게 유지(장황 방지). 추론형 모델은
-    # '생각 토큰'도 여기 포함되니 너무 낮으면 답이 잘린다 → 320 안팎 권장. .env: LLM_MAX_TOKENS
+    # '생각 토큰'도 여기 포함되니 너무 낮으면 답이 잘린다 → Gemma q4는 640~1024 권장.
+    # .env: LLM_MAX_TOKENS
     llm_max_tokens: int = 320
+    # 로컬/양자화 모델은 샘플링을 낮게 둬야 툴 선택과 짧은 답변이 안정적이다.
+    # .env: LLM_TEMPERATURE
+    llm_temperature: float = 0.1
     # 로컬 모델이 도구 호출 후 최종 텍스트를 비우는 경우, 한 번 더 "최종 문장만" 강제 재요청.
     # 빈 답일 때만 발동(정상 답이면 추가 호출 없음). 지연이 부담되면 .env 로 끈다.
     empty_reply_retry: bool = True
+    # 로컬(양자화) 모델이 도구콜 JSON을 깨뜨려 500이 나는 경우(비결정적)의 자동 재시도 횟수.
+    # 예: 2 → 최대 3번 시도. 대부분 한 번쯤은 정상 JSON이 나와 성공한다.
+    tool_error_retries: int = 2
+    # 데모 핵심 발화를 LLM 전에 규칙 라우터로 안정 처리할지 여부.
+    # 순수 에이전트 성능을 비교할 때만 .env/환경변수로 false.
+    demo_rule_router_enabled: bool = True
+    # 복합 리플레이/카메라 명령을 action plan으로 분해해 실행할지 여부.
+    command_planner_enabled: bool = True
 
     # 음성 공급자 — .env 의 STT_PROVIDER/TTS_PROVIDER 로 교체(모델 교체 시 여기만 바꿈)
     stt_provider: str = "whisper"    # whisper | voxtral
@@ -42,10 +54,20 @@ class Settings(BaseSettings):
     # ⚠️ 켜면 Unity의 규칙형 PointOutWatcher는 꺼야 한다(안내 겹침 방지). 기본 off.
     predict_watcher_enabled: bool = False
     # ⚠️ 확률은 isotonic 보정값이라 강한 접전도 ~0.3 안팎(희귀 사건). 0.5는 거의 안 울림.
-    #    발표 전 스모크 테스트로 실제 확률 분포를 보고 이 값을 튜닝할 것(0.15~0.3 권장).
-    watcher_threshold: float = 0.2     # 이 확률 이상이면 안내(0~1)
-    watcher_period_sec: float = 3.0    # 감시 주기(초)
-    watcher_cooldown_sec: float = 15.0 # 연속 안내 최소 간격(초)
+    #    데모 기본값은 오탐을 줄이기 위해 보수적으로 둔다. 필요 시 .env에서 낮춘다.
+    watcher_threshold: float = 0.3     # 이 확률 이상이면 안내(0~1)
+    watcher_period_sec: float = 0.5    # 감시 주기(초)
+    watcher_cooldown_sec: float = 10.0 # 연속 안내 최소 간격(초)
+    watcher_ignore_lap1: bool = True   # 스타트/포메이션성 1랩 안내 억제
+    watcher_require_closing: bool = True # 앞차와 간격이 벌어지는 후보는 억제
+    watcher_hybrid_enabled: bool = True # ML 점수 + gap/closing 도메인 신호 결합
+    watcher_hybrid_gap_sec: float = 0.85
+    watcher_hybrid_closing_delta: float = -0.05
+    watcher_hybrid_min_probability: float = 0.05
+    watcher_fast_hybrid_enabled: bool = True
+    watcher_fast_gap_sec: float = 0.15
+    watcher_fast_closing_delta: float = -0.1
+    watcher_fast_min_elapsed_sec: float = 300.0
     # 능동 안내 오탐 평가용 로그. 안내할 때마다 예측(차량·시각·확률)을 jsonl로 적재하고,
     # 나중에 scripts/eval_watcher.py 로 실제 추월 여부와 대조해 오탐률·Precision@K를 집계한다.
     watcher_eval_enabled: bool = True

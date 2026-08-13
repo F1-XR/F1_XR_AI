@@ -20,9 +20,10 @@ from langchain_openai import ChatOpenAI
 from langgraph.prebuilt import create_react_agent
 
 from ..config import settings
-from .commands import drain, start_capture
+from .commands import drain, emit_command, start_capture
 from .context import current_selected, current_session, current_time, set_context
-from .tools import ALL_TOOLS
+from .planner import build_command_plan, execute_command_plan, normalize_command_order
+from .tools import ALL_TOOLS, get_driver_info, jump_to_event, show_battle_context
 
 logger = logging.getLogger(__name__)
 
@@ -45,6 +46,9 @@ SYSTEM_PROMPT = """당신은 F1을 처음 보는 사람을 위한 친절한 관�
 - 선수를 언급하면 필요 시 highlight_driver로 화면에서 함께 짚어주세요.
 - 두 차의 근접·추월 압박(간격/추세/DRS)을 물으면 show_battle_context로 두 차 사이에 공간 표시(Gap Line+배지)를 함께 띄우세요.
 - "천천히 다시 보여줘"처럼 여러 동작이 섞인 요청은 도구를 순서대로 여러 번 호출하세요.
+  예: "그 추월 장면 직전으로 돌아가서 천천히 보여줘" →
+  jump_to_event(event_type="first_overtake_before") 호출 후
+  control_replay(action="speed", value=0.5) 호출. 선택 차량이 있으면 highlight_driver도 함께 호출하세요.
 - 전문용어가 나오면 먼저 explain_concept로 뜻을 풀어주세요.
 - ⚠️ 매우 중요: 도구(get_driver_info 등)를 호출했다면, 그 결과를 바탕으로 **반드시 한국어 최종 문장**으로 답하세요.
   도구만 부르고 아무 말 없이 끝내지 마세요. 선수를 조회했으면 이름을 먼저 말하고
@@ -85,7 +89,7 @@ def _context_message() -> str | None:
 def build_agent():
     llm = ChatOpenAI(
         model=settings.llm_model,
-        temperature=0.3,
+        temperature=settings.llm_temperature,
         api_key=settings.openai_api_key or None,
         base_url=settings.llm_base_url or None,   # 로컬/호환 엔드포인트면 그쪽으로(비우면 OpenAI)
         max_tokens=settings.llm_max_tokens,       # 음성 답변용 상한(장황 방지·잘림 방지 균형)
@@ -165,46 +169,185 @@ def _parse_tool_data(raw):
     return None
 
 
-def _salvage_from_tools(messages: list) -> str | None:
+_TREND_KO = {
+    "closing": " 간격이 점점 좁혀지는 중이에요.",
+    "opening": " 간격이 벌어지는 중이에요.",
+    "stable": "",
+}
+
+
+def _driver_sentence(d: dict) -> str:
+    who, team, num = d["name"], d.get("team"), d.get("number")
+    head = f"{num}번은" if num else "이 선수는"
+    tail = f" {team} 소속이에요." if team else ""
+    return f"{head} {who} 선수예요.{tail}"
+
+
+def _battle_sentence(d: dict) -> str:
+    gap = d["gap_seconds"]
+    drs = " DRS도 열렸어요." if d.get("drs") else ""
+    return (f"앞차와 {gap}초 차이예요.{_TREND_KO.get(d.get('trend'), '')}"
+            f"{drs} 두 차 사이를 화면에 표시했어요.")
+
+
+def _concept_sentence(d: dict) -> str | None:
+    term, explanation = d.get("term"), d.get("explanation")
+    if not explanation:
+        return None
+    return f"{term}는 {explanation}"
+
+
+def _race_status_sentence(d: dict) -> str | None:
+    standings = d.get("standings") or []
+    if standings:
+        leader = standings[0]
+        who = leader.get("driver") or f"{leader.get('driver_number')}번"
+        return f"현재 1등은 {who} 선수예요."
+    flag = d.get("latest_flag") or {}
+    if flag.get("message"):
+        return f"현재 경기 상황은 {flag['message']}입니다."
+    return None
+
+
+def _why_sentence(d: dict) -> str | None:
+    name = d.get("driver_name") or f"{d.get('driver_number')}번"
+    pits = d.get("pit_stops") or []
+    stints = d.get("tire_stints") or []
+    gap = d.get("recent_gap") or {}
+    if pits:
+        compound = stints[-1].get("compound") if stints else None
+        tail = f" 지금은 {compound} 타이어를 쓰고 있어요." if compound else ""
+        return f"{name} 선수는 타이어 교체를 위해 피트인했어요.{tail}"
+    if gap.get("interval") is not None:
+        return f"{name} 선수는 앞차와 {gap['interval']}초 차이예요."
+    return None
+
+
+def _salvage_from_tools(messages: list, text: str = "") -> str | None:
     """LLM이 최종 문장을 못 냈을 때, 이번 턴 도구 결과로 최소한의 답을 복구한다.
 
-    우선순위:
-      1) get_driver_info(선수 정보) 결과 → "N번은 OOO 선수예요." (이름 우선)
-      2) 명령형 도구가 돌려준 확인 문구(문자열) → 그대로 사용
-         (예: "드론 시점으로 전환했어요", "16번 선수를 화면에서 강조했어요")
+    모델이 한 턴에 여러 도구를 부를 수 있으므로(예: 갭 질문에 show_battle_context와
+    get_driver_info를 둘 다 호출) '질문 의도'에 맞는 결과를 우선 고른다.
     """
     turn = _current_turn(messages)   # 이번 턴 도구 결과만(이전 턴 오염 방지)
 
-    # 1) 데이터 도구(dict) — 선수 정보(이름)나 배틀 상황(간격/추세)로 한 문장 복구
-    _trend_ko = {
-        "closing": " 간격이 점점 좁혀지는 중이에요.",
-        "opening": " 간격이 벌어지는 중이에요.",
-        "stable": "",
-    }
-    for m in reversed(turn):
+    dicts: list[dict] = []
+    strings: list[str] = []
+    for m in reversed(turn):         # 최근 것부터
         if getattr(m, "type", None) != "tool":
             continue
         data = _parse_tool_data(m.content)
-        if not isinstance(data, dict):
-            continue
-        if data.get("name"):                       # get_driver_info
-            who, team, num = data["name"], data.get("team"), data.get("number")
-            head = f"{num}번은" if num else "이 선수는"
-            tail = f" {team} 소속이에요." if team else ""
-            return f"{head} {who} 선수예요.{tail}"
-        if data.get("gap_seconds") is not None:    # show_battle_context
-            gap = data["gap_seconds"]
-            drs = " DRS도 열렸어요." if data.get("drs") else ""
-            return (f"앞차와 {gap}초 차이예요.{_trend_ko.get(data.get('trend'), '')}"
-                    f"{drs} 두 차 사이를 화면에 표시했어요.")
+        if isinstance(data, dict):
+            dicts.append(data)
+        elif isinstance(m.content, str) and m.content.strip():
+            strings.append(m.content.strip())
 
-    # 2) 명령형 도구의 확인 문구(dict가 아닌 순수 문자열) — 가장 최근 것
-    for m in reversed(turn):
-        if getattr(m, "type", None) != "tool":
-            continue
-        raw = m.content
-        if isinstance(raw, str) and raw.strip() and _parse_tool_data(raw) is None:
-            return raw.strip()
+    battle = next((d for d in dicts if d.get("gap_seconds") is not None), None)
+    driver = next((d for d in dicts if d.get("name")), None)
+    concept = next((d for d in dicts if d.get("term") and "explanation" in d), None)
+    race_status = next((d for d in dicts if "standings" in d or "latest_flag" in d), None)
+    why = next((d for d in dicts if "pit_stops" in d or "tire_stints" in d or "recent_gap" in d), None)
+
+    want_battle = any(k in text for k in ("갭", "간격", "차이", "붙", "앞차", "배틀", "추격", "따라"))
+    want_name = any(k in text for k in ("누구", "이름"))
+    want_status = any(k in text for k in ("몇 등", "몇등", "1등", "일등", "순위", "상황"))
+    want_why = "왜" in text
+    want_concept = any(k in text for k in ("뭐야", "무엇", "뜻", "설명"))
+
+    # 1) 질문 의도에 맞는 결과 우선
+    if want_battle and battle:
+        return _battle_sentence(battle)
+    if want_name and driver:
+        return _driver_sentence(driver)
+    if want_why and why:
+        return _why_sentence(why)
+    if want_status and race_status:
+        return _race_status_sentence(race_status)
+    if want_concept and concept:
+        return _concept_sentence(concept)
+    # 2) 의도가 모호하면 이름 → 배틀 순
+    if driver:
+        return _driver_sentence(driver)
+    if battle:
+        return _battle_sentence(battle)
+    if why:
+        return _why_sentence(why)
+    if race_status:
+        return _race_status_sentence(race_status)
+    if concept:
+        return _concept_sentence(concept)
+    # 3) 명령형 도구의 확인 문구(문자열)
+    if strings:
+        return strings[0]
+    return None
+
+
+async def _rule_based_demo_route(text: str) -> tuple[str, list[dict], bool] | None:
+    """데모 핵심 명령은 LLM 전에 안정적으로 처리한다.
+
+    Gemma q4가 짧은 명령을 빈 답으로 끝내거나 엉뚱한 조회 도구를 고르는 경우를 막기 위한
+    얇은 안전장치다. 데이터 조회가 필요한 지목/배틀/추월 장면은 기존 도구를 그대로 호출한다.
+    """
+    t = text.replace(" ", "")
+    selected = current_selected()
+
+    # 지목 grounding: "이 선수/이 차/쟤 누구야?"
+    if selected and any(k in t for k in ("이선수누구", "이차누구", "쟤누구", "얘누구")):
+        start_capture()
+        data = await get_driver_info.ainvoke({"driver_number": selected})
+        emit_command("highlightDriver", driver_number=selected)
+        reply = _driver_sentence(data) if isinstance(data, dict) and data.get("name") else \
+            f"{selected}번 선수 정보를 찾지 못했어요."
+        return reply, drain(), bool(data.get("name") if isinstance(data, dict) else False)
+
+    # 공간 배틀 배지: 선택 차량 기준으로 앞차와의 간격 표시.
+    if selected and any(k in t for k in ("앞차", "얼마나붙", "배틀상황", "간격", "갭")):
+        start_capture()
+        data = await show_battle_context.ainvoke({"driver_number": selected})
+        if isinstance(data, dict) and data.get("shown"):
+            return _battle_sentence(data), drain(), True
+        return (data.get("note") if isinstance(data, dict) else "배틀 상황을 찾지 못했어요."), drain(), False
+
+    # 복합 추월 장면: seek → slow → optional highlight 순서 보장.
+    if "추월" in t and "장면" in t and any(k in t for k in ("가줘", "보여", "돌아", "직전")):
+        start_capture()
+        event_type = "first_overtake_before" if any(k in t for k in ("직전", "돌아")) else "first_overtake"
+        msg = await jump_to_event.ainvoke({"event_type": event_type})
+        if "천천히" in t or "느리게" in t:
+            emit_command("controlReplay", action="speed", value=0.5)
+        if selected:
+            emit_command("highlightDriver", driver_number=selected)
+        commands = drain()
+        ok = bool(commands)
+        if not ok:
+            return msg, commands, ok
+        if event_type.endswith("_before"):
+            reply = "추월 장면 직전으로 이동해서 천천히 보여드릴게요."
+        else:
+            reply = "첫 추월 장면으로 이동할게요."
+        return reply, normalize_command_order(commands), ok
+
+    # 기본 리플레이 제어.
+    if any(k in t for k in ("멈춰", "정지", "일시정지")):
+        start_capture()
+        emit_command("controlReplay", action="pause", value=None)
+        return "네, 화면을 멈췄어요.", drain(), True
+    if any(k in t for k in ("다시재생", "재생해", "플레이")):
+        start_capture()
+        emit_command("controlReplay", action="play", value=None)
+        return "리플레이를 다시 재생할게요.", drain(), True
+    if any(k in t for k in ("천천히", "느리게", "슬로우")):
+        start_capture()
+        emit_command("controlReplay", action="speed", value=0.5)
+        return "리플레이 속도를 0.5배로 늦춰서 보여드릴게요.", drain(), True
+
+    # 드론 시점.
+    if "드론" in t or "공중" in t:
+        start_capture()
+        on = not any(k in t for k in ("꺼", "원래", "돌아"))
+        emit_command("droneView", on=on)
+        return ("드론 시점으로 전환했어요." if on else "원래 시점으로 돌아왔어요."), drain(), True
+
     return None
 
 
@@ -225,8 +368,6 @@ async def run_agent(
         commands: Unity로 보낼 명령 리스트(마커·리플레이·점프)
     """
     set_context(session_key, at_time, selected_driver)   # 이번 요청의 세션/시각/선택대상 고정
-    start_capture()                     # 명령 버퍼 열기
-
     # SYSTEM_PROMPT(고정 지침) + 현재 관람 맥락(동적)을 하나의 system 메시지로 합쳐 주입.
     system = SYSTEM_PROMPT
     ctx = _context_message()
@@ -234,7 +375,33 @@ async def run_agent(
         system = f"{SYSTEM_PROMPT}\n\n{ctx}"
     messages: list = [("system", system)] + list(history or []) + [("user", text)]
     try:
-        result = await get_agent().ainvoke({"messages": messages})
+        if settings.command_planner_enabled:
+            plan = build_command_plan(text, current_selected())
+            if plan:
+                return await execute_command_plan(plan)
+
+        if settings.demo_rule_router_enabled:
+            routed = await _rule_based_demo_route(text)
+            if routed is not None:
+                return routed
+
+        # 로컬(양자화) 모델이 도구콜 JSON을 깨뜨려 500이 나는 경우가 잦다(비결정적).
+        # 실패하면 명령 버퍼를 비우고 몇 번 더 시도 → 대개 성공하는 시도가 나온다.
+        attempts = 1 + max(0, settings.tool_error_retries)
+        result = None
+        last_exc: Exception | None = None
+        for attempt in range(attempts):
+            start_capture()   # 시도마다 명령 버퍼 초기화(부분 실패 명령 누적 방지)
+            try:
+                result = await get_agent().ainvoke({"messages": messages})
+                last_exc = None
+                break
+            except Exception as e:
+                last_exc = e
+                logger.warning("[재시도] LLM 호출 실패(%d/%d): %s",
+                               attempt + 1, attempts, str(e)[:140])
+        if last_exc is not None:
+            raise last_exc
 
         # [임시 진단] 모델이 어떤 도구를 부르고 무엇을 반환했는지, 최종 텍스트가 비었는지 확인용.
         # 원인 파악 후 제거 예정.
@@ -247,40 +414,57 @@ async def run_agent(
 
         reply = _extract_reply(result["messages"])
 
-        # 1차 방어(재요청): 도구만 부르고 최종 텍스트를 비웠으면, 한 번 더
-        # "도구 그만, 지금까지 결과로 한국어 1~2문장 답만" 강제해 자연스러운 답을 유도한다.
+        # 1차 방어(재요청): 최종 텍스트가 비면 한 번 더 시도한다.
         # (빈 답일 때만 1회 — 정상 답이면 추가 호출 없음.)
+        # 문구는 '도구가 필요하면 부르고, 결과로 반드시 답하라'로 — 모델이 도구를 아예
+        # 안 부르고 비운 경우(tool_calls=None)에도 도구 호출을 유도할 수 있게 한다.
         if not reply and settings.empty_reply_retry:
-            try:
-                retry_msgs = list(result["messages"]) + [(
-                    "user",
-                    "도구를 더 부르지 말고, 지금까지 얻은 정보만으로 "
-                    "직전 질문에 한국어 1~2문장으로 답만 말해줘.",
-                )]
-                retry = await get_agent().ainvoke({"messages": retry_msgs})
-                reply = _extract_reply(retry["messages"])
-                logger.warning("[재요청] 결과: %s", f"복구됨: {reply!r}" if reply else "재요청도 빈 답")
-            except Exception:
-                logger.exception("[재요청] 실패(무시하고 폴백)")
+            # history를 뺀 '깨끗한 문맥'으로 현재 질문만 다시 던진다. 반복 질문에서 모델이
+            # 이전 답을 보고 아무것도 안 하거나(whiff), 오염된 문맥으로 비우는 걸 막고
+            # 새 샘플링으로 다시 시도하게 한다.
+            clean_msgs = [
+                ("system", system),
+                ("user", text),
+                ("user", "위 질문에 답해줘. 필요하면 도구를 호출하고, 한국어 1~2문장으로 반드시 답해."),
+            ]
+            # 버퍼는 초기화하지 않는다 — 1차 시도의 Unity 명령(gap line 등)을 보존.
+            # 재시도가 같은 도구를 또 불러도 핸들러가 idempotent라 무해.
+            for _ in range(1 + max(0, settings.tool_error_retries)):
+                try:
+                    retry = await get_agent().ainvoke({"messages": clean_msgs})
+                    reply = _extract_reply(retry["messages"])
+                    logger.warning("[재요청] 결과: %s",
+                                   f"복구됨: {reply!r}" if reply else "재요청도 빈 답")
+                    if reply:
+                        result = retry   # salvage도 재시도의 도구 결과를 보도록 교체
+                        break
+                except Exception as e:
+                    logger.warning("[재요청] 실패(재시도): %s", str(e)[:120])
 
         # 2차 방어(복구): 재요청도 비면 도구 결과로 최소 답 복구, 그래도 없으면 안내.
+        # ok = 이 답을 대화 history에 남겨도 되는지. generic 폴백은 남기면 안 된다
+        # (이전 폴백이 history에 쌓여 모델을 오염시키는 악순환 방지).
+        ok = bool(reply)
         if not reply:
-            reply = _salvage_from_tools(result["messages"]) or \
-                "화면에 표시했어요. 더 궁금한 점 있으신가요?"
-            logger.warning("LLM 최종 텍스트가 비어 폴백 사용: %r", reply)
-        commands = drain()              # 도구가 쌓아둔 Unity 명령 회수
-        return reply, commands
+            salvaged = _salvage_from_tools(result["messages"], text)
+            reply = salvaged or "화면에 표시했어요. 더 궁금한 점 있으신가요?"
+            ok = salvaged is not None   # 이름/배틀/명령 복구는 저장 OK, generic은 제외
+            logger.warning("빈 답 폴백: %r (history저장=%s)", reply, ok)
+        commands = normalize_command_order(drain())  # 도구가 쌓아둔 Unity 명령 회수
+        return reply, commands, ok
     except Exception as exc:
         # LLM·도구·데이터서버 오류 시 대화를 끊지 않고 우아하게 실패한다.
         # (에러는 로그로 남기고, 사용자에겐 짧은 안내만.)
         logger.exception("run_agent 처리 중 오류")
         drain()                         # 남은 명령 버퍼 비우기
-        # 설정(모델·키) 오류는 첫 세팅 때 원인이 보여야 하므로 명확히 안내한다.
+        # 인증/키 오류만 '설정 오류'로 명확히 안내한다. (도구콜 JSON 파싱 실패 같은
+        # 일시적 500은 여기에 걸리면 안 됨 → 아래 우아한 재시도 안내로 빠진다.)
         m = str(exc).lower()
-        if any(k in m for k in ("model", "api_key", "authentication", "credential", "invalid")):
+        if any(k in m for k in ("api_key", "api key", "authentication",
+                                "credential", "unauthorized", "invalid_api_key")):
             return (
                 f"⚠️ 설정 오류로 보여요: {exc}\n"
                 "→ .env 의 OPENAI_API_KEY / LLM_MODEL 을 확인하세요. "
                 "(모델 목록: python -m scripts.list_models)"
-            ), []
-        return "죄송해요, 잠시 문제가 생겼어요. 다시 한 번 말씀해 주세요.", []
+            ), [], False
+        return "죄송해요, 잠시 문제가 생겼어요. 다시 한 번 말씀해 주세요.", [], False

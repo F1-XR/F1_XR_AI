@@ -19,7 +19,7 @@ from app.agent.graph import run_agent  # noqa: E402 (로깅 설정 후 import)
 async def main() -> None:
     q = sys.argv[1] if len(sys.argv) > 1 else "DRS가 뭐야?"
     print(f"질문: {q!r}\n--- 실행(에러가 나면 아래에 traceback이 찍힘) ---")
-    reply, commands = await run_agent(q)
+    reply, commands, _ = await run_agent(q)
     print("\n=== 최종 응답 ===")
     print(reply)
     print("Unity 명령:", commands)

@@ -23,7 +23,7 @@ async def main() -> None:
         if not text:
             continue
 
-        reply, commands = await run_agent(text, history=history)
+        reply, commands, _ = await run_agent(text, history=history)
         history += [("user", text), ("assistant", reply)]
 
         for cmd in commands:

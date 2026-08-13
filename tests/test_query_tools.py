@@ -137,6 +137,7 @@ async def test_explain_why_no_spoiler(monkeypatch):
 # ───────────────────────── find_session ─────────────────────────
 
 async def test_find_session_found(monkeypatch):
+    set_context(9839, None)
     monkeypatch.setattr(openf1, "find_sessions", _aret([{
         "session_key": 9523, "country_name": "Monaco",
         "circuit_short_name": "Monte Carlo", "year": 2024, "session_name": "Race",

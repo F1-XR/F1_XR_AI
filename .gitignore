@@ -224,3 +224,6 @@ __marimo__/
 
 # watcher 오탐 평가 로그
 logs/
+
+# FUSE 마운트 임시 잔재(열린 파일 덮어쓰기 시 생김)
+.fuse_hidden*

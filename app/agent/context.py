@@ -8,10 +8,13 @@ commands.py와 같은 방식: contextvar에 dict를 담고 그 '내용을 in-pla
 from __future__ import annotations
 
 import contextvars
+from threading import Lock
 
 from ..config import settings
 
 _ctx: contextvars.ContextVar[dict] = contextvars.ContextVar("req_ctx")
+_recent_overtake_lock = Lock()
+_recent_overtake: dict | None = None
 
 
 def _state() -> dict:
@@ -52,3 +55,16 @@ def current_time() -> str | None:
 def current_selected() -> int | None:
     """사용자가 지목한 차량 번호("이 선수"의 대상). 없으면 None."""
     return _state().get("selected_driver")
+
+
+def set_recent_overtake(event: dict | None) -> None:
+    """최근 watcher가 안내한 추월 이벤트를 저장한다."""
+    global _recent_overtake
+    with _recent_overtake_lock:
+        _recent_overtake = dict(event) if event else None
+
+
+def current_recent_overtake() -> dict | None:
+    """최근 watcher 추월 이벤트. 없으면 None."""
+    with _recent_overtake_lock:
+        return dict(_recent_overtake) if _recent_overtake else None

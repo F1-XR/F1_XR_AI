@@ -13,11 +13,13 @@ import asyncio
 import base64
 import binascii
 import logging
+import time
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 
 from .agent.graph import run_agent
+from .agent.context import set_recent_overtake
 from .agent.watcher import watch
 from .config import settings
 from .voice import stt, tts
@@ -133,16 +135,24 @@ async def _handle_utterance(send, text: str, msg: dict, history: list) -> int | 
     # 공간 맥락: 사용자가 지목(클릭·XR Ray)한 차량 번호 → "이 선수" 해석용.
     ictx = msg.get("interaction_context") or {}
     selected_driver = ictx.get("driver_number")
+    # [진단] 선택 드라이버가 실제로 왔는지 서버 로그로 바로 확인.
+    #   None 이면 → Unity에서 차 선택이 안 실려온 것(interaction_context 없음).
+    #   숫자면 → grounding 데이터는 정상, 이후는 모델 문제.
+    logger.warning("[수신] text=%r | selected_driver=%s | session=%s",
+                   text, selected_driver, msg.get("session_key"))
 
-    reply, commands = await run_agent(
+    reply, commands, ok = await run_agent(
         text=text,
         session_key=msg.get("session_key"),
         at_time=msg.get("at_time"),
         history=history,
         selected_driver=selected_driver,
     )
-    history += [("user", text), ("assistant", reply)]
-    del history[: -MAX_HISTORY_TURNS * 2]   # 최근 N턴만 유지
+    # 실제 답(ok=True)만 history에 남긴다. generic 폴백("화면에 표시했어요")을 저장하면
+    # 다음 턴 모델이 그걸 보고 따라 하며 빈 답을 반복하는 오염이 생긴다 → 그 턴은 통째로 버린다.
+    if ok:
+        history += [("user", text), ("assistant", reply)]
+        del history[: -MAX_HISTORY_TURNS * 2]   # 최근 N턴만 유지
 
     switched_session: int | None = None
     for cmd in commands:                    # ③ Unity 명령 먼저
@@ -189,17 +199,29 @@ async def ws(websocket: WebSocket):
     latest_state: dict = {"v": None}
     watcher_task: asyncio.Task | None = None
 
-    async def _announce(driver_number: int, probability: float, message: str) -> None:
+    async def _announce(
+        driver_number: int,
+        probability: float,
+        message: str,
+        event: dict | None = None,
+    ) -> None:
         """watcher가 부르는 콜백 — 그 차에 예측 리본 표시 + 안내 음성(TTS).
 
         highlightDriver(선택 강조) 대신 predictOvertake를 보낸다: 능동 안내는 수동 예측이라
         사용자의 '선택 차량(이 선수)'을 가로채면 안 되고, 리본이 예측 표현에 더 맞다.
         probability(0~1)는 Unity가 리본 강도로 사용한다.
         """
+        if event:
+            set_recent_overtake(event)
         await send({
             "type": "command", "name": "predictOvertake",
-            "args": {"driver_number": driver_number, "probability": round(probability, 4)},
+            "args": {
+                "driver_number": driver_number,
+                "probability": round(max(probability, 0.85), 4),
+                "risk_label": "Overtake Risk High",
+            },
         })
+        await send({"type": "assistant_text", "text": message})
         audio_b64 = await _synthesize_safe(message)
         if audio_b64 is not None:
             await send({"type": "tts_announce", "format": "wav", "data": audio_b64})
@@ -221,6 +243,9 @@ async def ws(websocket: WebSocket):
             # 리플레이 상태 heartbeat — 발화 없이도 현재 시각을 알려준다(예측형 능동 안내용).
             # 첫 heartbeat가 오고 기능이 켜져 있으면 감시 루프를 백그라운드로 시작한다.
             if mtype == "replay_state":
+                msg["_received_monotonic"] = time.monotonic()
+                if "is_playing" not in msg and "isPlaying" in msg:
+                    msg["is_playing"] = msg["isPlaying"]
                 latest_state["v"] = msg
                 if settings.predict_watcher_enabled and watcher_task is None:
                     logger.info("[hb] 첫 replay_state 수신 → watcher 태스크 시작")
@@ -252,6 +277,18 @@ async def ws(websocket: WebSocket):
 
             if not text:
                 continue
+
+            # 발화에 현재 리플레이 시각이 빠졌으면 최신 heartbeat 값을 보강한다.
+            # Unity가 at_time을 매 발화에 싣지 못해도 스포일러 방지와 "현재 상황" 답변이
+            # 결승 완료 기준으로 새는 문제를 막는다.
+            if not msg.get("at_time"):
+                st = latest_state["v"] or {}
+                if st.get("at_time"):
+                    msg["at_time"] = st["at_time"]
+            if msg.get("session_key") is None:
+                st = latest_state["v"] or {}
+                if st.get("session_key") is not None:
+                    msg["session_key"] = st["session_key"]
 
             # 한 발화 처리 중 오류가 나도 연결·대화는 유지한다(우아한 실패).
             try:

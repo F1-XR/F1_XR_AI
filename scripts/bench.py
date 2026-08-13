@@ -22,7 +22,7 @@ async def main() -> None:
 
     # ① 에이전트(LLM)
     t0 = time.perf_counter()
-    reply, cmds = await run_agent(q)
+    reply, cmds, _ = await run_agent(q)
     t1 = time.perf_counter()
     print(f"① LLM(에이전트) : {t1 - t0:6.1f}s   (응답 {len(reply)}자, 명령 {len(cmds)}개)")
 
