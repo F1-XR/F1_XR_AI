@@ -353,7 +353,9 @@ async def show_battle_context(driver_number: int) -> dict:
         return {"shown": False, "note": "앞차를 특정하지 못했어요."}
 
     # 2) 간격(초)과 추세 — subject의 intervals (음수 변화 = 좁혀짐 = closing)
+    #    API가 시간순을 보장하지 않으므로 date로 정렬해 iv[-1]이 '진짜 최신'이 되게 한다.
     iv = _before(await openf1.get_intervals(session, driver_number), cutoff)
+    iv = sorted(iv, key=lambda r: r.get("date") or "")
     gap = _num(iv[-1].get("interval")) if iv else None
     trend = "stable"
     if iv and gap is not None and iv[-1].get("date"):
@@ -385,7 +387,9 @@ async def show_battle_context(driver_number: int) -> dict:
             sxx = sum(t * t for t, _ in pts); sxy = sum(t * g for t, g in pts)
             denom = n * sxx - sx * sx
             slope = (n * sxy - sx * sy) / denom if abs(denom) > 1e-9 else 0.0   # d(gap)/dt
-            predicted_gap = max(0.0, round(gap + slope * horizon, 2))           # 3초 뒤 예측 갭
+            # 노이즈 큰 기울기가 비현실적 예측(예: 15초)을 내지 않도록 3초 변화량을 ±2.0초로 제한.
+            delta = max(-2.0, min(2.0, slope * horizon))
+            predicted_gap = max(0.0, round(gap + delta, 2))                     # 3초 뒤 예측 갭
 
     # 3) DRS — subject의 car_data 창(현재 시각 근처). drs 코드 10/12/14 = 작동 중.
     drs = False
@@ -555,7 +559,7 @@ async def explain_situation(driver_number: int | None = None) -> dict:
 
     async def _prob(dn, gap):
         # (C) watcher가 백그라운드로 미리 계산한 확률이 있으면 즉시 사용(재계산 안 함).
-        cached = get_driver_prob(dn)
+        cached = get_driver_prob(session, dn)
         if cached is not None:
             return cached, "watcher"
         # 캐시에 없고 '먼 차'면 계산 생략(먼 차의 추월확률은 낮고 계산이 무겁다).

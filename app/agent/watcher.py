@@ -353,7 +353,7 @@ async def watch(
                     )
                     continue
                 prob = _pred.predict(feats).get("overtake_probability", 0.0) or 0.0
-                set_driver_prob(dn, prob)   # (C) explain_situation이 즉시 읽도록 캐시
+                set_driver_prob(session, dn, prob)   # (C) explain_situation이 즉시 읽도록 (세션별) 캐시
                 gap = feats.get("gap_ahead")
                 hybrid_hit = (
                     settings.watcher_hybrid_enabled

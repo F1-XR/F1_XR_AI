@@ -73,21 +73,29 @@ def current_recent_overtake() -> dict | None:
 
 # ── 드라이버별 '최신 추월확률' 캐시 (watcher가 채우고, explain_situation이 즉시 읽음) ──
 _driver_prob_lock = Lock()
-_driver_probs: dict[int, tuple[float, float]] = {}   # driver_number -> (monotonic_ts, prob)
+# (session_key, driver_number) -> (monotonic_ts, prob)
+# 세션별로 분리해 다른 경기의 캐시가 섞이지 않도록 한다.
+_driver_probs: dict[tuple[int, int], tuple[float, float]] = {}
 
 
-def set_driver_prob(driver_number: int, prob: float | None) -> None:
-    """watcher가 후보 드라이버의 추월확률을 계산할 때마다 최신값을 저장한다."""
+def _prob_key(session_key: int | None, driver_number: int) -> tuple[int, int]:
+    # session_key가 None이면 -1로 정규화(기본 세션과 명시 세션을 구분).
+    return (int(session_key) if session_key is not None else -1, int(driver_number))
+
+
+def set_driver_prob(session_key: int | None, driver_number: int, prob: float | None) -> None:
+    """watcher가 후보 드라이버의 추월확률을 계산할 때마다 (세션·드라이버별) 최신값을 저장한다."""
     if prob is None:
         return
     with _driver_prob_lock:
-        _driver_probs[int(driver_number)] = (time.monotonic(), float(prob))
+        _driver_probs[_prob_key(session_key, driver_number)] = (time.monotonic(), float(prob))
 
 
-def get_driver_prob(driver_number: int, max_age_sec: float = 20.0) -> float | None:
-    """최근(max_age_sec 이내) watcher가 계산한 추월확률. 없거나 오래됐으면 None(→ 직접 계산)."""
+def get_driver_prob(session_key: int | None, driver_number: int,
+                    max_age_sec: float = 20.0) -> float | None:
+    """최근(max_age_sec 이내) watcher가 이 세션에서 계산한 추월확률. 없거나 오래됐으면 None(→ 직접 계산)."""
     with _driver_prob_lock:
-        v = _driver_probs.get(int(driver_number))
+        v = _driver_probs.get(_prob_key(session_key, driver_number))
     if not v:
         return None
     ts, prob = v
