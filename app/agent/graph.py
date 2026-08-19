@@ -19,6 +19,7 @@ import logging
 from langchain_openai import ChatOpenAI
 from langgraph.prebuilt import create_react_agent
 
+from .. import obs
 from ..config import settings
 from .commands import drain, emit_command, start_capture
 from .context import current_selected, current_session, current_time, set_context
@@ -395,12 +396,16 @@ async def run_agent(
         if settings.command_planner_enabled:
             plan = build_command_plan(text, current_selected())
             if plan:
+                obs.record_path("planner")   # 계측용(트레이스 없으면 no-op)
                 return await execute_command_plan(plan)
 
         if settings.demo_rule_router_enabled:
             routed = await _rule_based_demo_route(text)
             if routed is not None:
+                obs.record_path("rule_router")   # 계측용(트레이스 없으면 no-op)
                 return routed
+
+        obs.record_path("react")   # LLM ReAct 경로(계측용)
 
         # 로컬(양자화) 모델이 도구콜 JSON을 깨뜨려 500이 나는 경우가 잦다(비결정적).
         # 실패하면 명령 버퍼를 비우고 몇 번 더 시도 → 대개 성공하는 시도가 나온다.
@@ -410,7 +415,8 @@ async def run_agent(
         for attempt in range(attempts):
             start_capture()   # 시도마다 명령 버퍼 초기화(부분 실패 명령 누적 방지)
             try:
-                result = await get_agent().ainvoke({"messages": messages})
+                with obs.stage("agent_llm"):   # LLM+툴 실행 시간 계측(트레이스 없으면 no-op)
+                    result = await get_agent().ainvoke({"messages": messages})
                 last_exc = None
                 break
             except Exception as e:
@@ -468,6 +474,16 @@ async def run_agent(
             ok = salvaged is not None   # 이름/배틀/명령 복구는 저장 OK, generic은 제외
             logger.warning("빈 답 폴백: %r (history저장=%s)", reply, ok)
         commands = normalize_command_order(drain())  # 도구가 쌓아둔 Unity 명령 회수
+        # 계측(트레이스 있을 때만): 이번 턴에 LLM이 호출한 도구·인자 기록 → 평가/벤치가 읽는다.
+        _trace = obs.current()
+        if _trace is not None:
+            try:
+                _trace.reply_chars = len(reply)
+                for _m in result["messages"]:
+                    for _c in (getattr(_m, "tool_calls", None) or []):
+                        _trace.add_tool_call(_c.get("name"), _c.get("args"))
+            except Exception:
+                pass
         return reply, commands, ok
     except Exception as exc:
         # LLM·도구·데이터서버 오류 시 대화를 끊지 않고 우아하게 실패한다.
