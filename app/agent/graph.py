@@ -194,8 +194,17 @@ def _driver_sentence(d: dict) -> str:
 def _battle_sentence(d: dict) -> str:
     gap = d["gap_seconds"]
     drs = " DRS도 열렸어요." if d.get("drs") else ""
+    # 3초 뒤 예측 갭(의미 있게 변할 때만, 예측임을 명시)
+    pred = d.get("predicted_gap_seconds")
+    hz = int(d.get("predict_horizon_sec") or 3)
+    fc = ""
+    if pred is not None and gap is not None:
+        if gap - pred >= 0.1:
+            fc = f" {hz}초 뒤엔 {pred}초로 좁혀질 것 같아요."
+        elif gap - pred <= -0.1:
+            fc = f" {hz}초 뒤엔 {pred}초로 벌어질 것 같아요."
     return (f"앞차와 {gap}초 차이예요.{_TREND_KO.get(d.get('trend'), '')}"
-            f"{drs} 두 차 사이를 화면에 표시했어요.")
+            f"{fc}{drs} 두 차 사이를 화면에 표시했어요.")
 
 
 def _concept_sentence(d: dict) -> str | None:

@@ -197,7 +197,16 @@ async def execute_command_plan(steps: list[PlanStep]) -> tuple[str, list[dict], 
                 gap = data.get("gap_seconds")
                 trend = {"closing": "간격이 좁혀지는 중이에요.", "opening": "간격이 벌어지는 중이에요."}.get(data.get("trend"), "")
                 drs = " DRS도 열렸어요." if data.get("drs") else ""
-                reply_parts.append(f"앞차와 {gap}초 차이예요. {trend}{drs}".strip())
+                # 3초 뒤 예측 갭을 음성에도 (의미 있게 변할 때만, 예측임을 명시)
+                pred = data.get("predicted_gap_seconds")
+                hz = int(data.get("predict_horizon_sec") or 3)
+                fc = ""
+                if pred is not None and gap is not None:
+                    if gap - pred >= 0.1:
+                        fc = f" {hz}초 뒤엔 {pred}초로 좁혀질 것 같아요."
+                    elif gap - pred <= -0.1:
+                        fc = f" {hz}초 뒤엔 {pred}초로 벌어질 것 같아요."
+                reply_parts.append(f"앞차와 {gap}초 차이예요. {trend}{fc}{drs}".strip())
             else:
                 ok = False
                 reply_parts.append((data or {}).get("note", "배틀 상황을 찾지 못했어요."))
