@@ -8,6 +8,7 @@ commands.py와 같은 방식: contextvar에 dict를 담고 그 '내용을 in-pla
 from __future__ import annotations
 
 import contextvars
+import time
 from threading import Lock
 
 from ..config import settings
@@ -68,3 +69,26 @@ def current_recent_overtake() -> dict | None:
     """최근 watcher 추월 이벤트. 없으면 None."""
     with _recent_overtake_lock:
         return dict(_recent_overtake) if _recent_overtake else None
+
+
+# ── 드라이버별 '최신 추월확률' 캐시 (watcher가 채우고, explain_situation이 즉시 읽음) ──
+_driver_prob_lock = Lock()
+_driver_probs: dict[int, tuple[float, float]] = {}   # driver_number -> (monotonic_ts, prob)
+
+
+def set_driver_prob(driver_number: int, prob: float | None) -> None:
+    """watcher가 후보 드라이버의 추월확률을 계산할 때마다 최신값을 저장한다."""
+    if prob is None:
+        return
+    with _driver_prob_lock:
+        _driver_probs[int(driver_number)] = (time.monotonic(), float(prob))
+
+
+def get_driver_prob(driver_number: int, max_age_sec: float = 20.0) -> float | None:
+    """최근(max_age_sec 이내) watcher가 계산한 추월확률. 없거나 오래됐으면 None(→ 직접 계산)."""
+    with _driver_prob_lock:
+        v = _driver_probs.get(int(driver_number))
+    if not v:
+        return None
+    ts, prob = v
+    return prob if (time.monotonic() - ts) <= max_age_sec else None

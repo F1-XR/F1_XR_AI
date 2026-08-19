@@ -15,10 +15,15 @@ class Settings(BaseSettings):
     # 응답 토큰 상한. 답변은 음성으로 읽어주므로 짧게 유지(장황 방지). 추론형 모델은
     # '생각 토큰'도 여기 포함되니 너무 낮으면 답이 잘린다 → Gemma q4는 640~1024 권장.
     # .env: LLM_MAX_TOKENS
-    llm_max_tokens: int = 320
+    llm_max_tokens: int = 1024
     # 로컬/양자화 모델은 샘플링을 낮게 둬야 툴 선택과 짧은 답변이 안정적이다.
     # .env: LLM_TEMPERATURE
     llm_temperature: float = 0.1
+    # ⚠️ 이 모델은 추론(reasoning)형이라 답 전에 '생각'을 길게 하고, 그 생각 토큰이
+    #    max_tokens를 소진하면 최종 답(content)이 빈 채로 잘린다(=안내 튜토리얼 먹통 원인).
+    #    아래를 켜면 요청 단위로 thinking을 꺼 답이 즉시 나온다(공유 서버 설정은 안 건드림).
+    #    vLLM/Qwen 계열: extra_body.chat_template_kwargs.enable_thinking=false 로 전달된다.
+    llm_disable_thinking: bool = True
     # 로컬 모델이 도구 호출 후 최종 텍스트를 비우는 경우, 한 번 더 "최종 문장만" 강제 재요청.
     # 빈 답일 때만 발동(정상 답이면 추가 호출 없음). 지연이 부담되면 .env 로 끈다.
     empty_reply_retry: bool = True

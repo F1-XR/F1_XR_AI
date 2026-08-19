@@ -19,7 +19,7 @@ from langchain_core.tools import tool
 
 from ..data import openf1
 from .commands import emit_command
-from .context import current_recent_overtake, current_session, current_time, set_session
+from .context import current_recent_overtake, current_selected, current_session, current_time, get_driver_prob, set_session
 
 logger = logging.getLogger(__name__)
 
@@ -403,6 +403,184 @@ async def show_battle_context(driver_number: int) -> dict:
     }
 
 
+# ────────────────────────────── 상황·전략 해설 ──────────────────────────────
+
+@tool
+async def explain_situation(driver_number: int | None = None) -> dict:
+    """지금 경기의 '상황 + 전략'을 종합 해설할 근거를 모은다.
+    단순 단답이 아니라 상황과 전략을 묶어 설명해야 할 때 사용한다.
+    예: "지금 상황 어때?", "무슨 전략이야?", "지금 경기 흐름/전략 설명해줘",
+        "왜 추월 압박이야?", "지금 전략 싸움 어떻게 돌아가?".
+    driver_number를 주면 그 선수 기준, 없으면 선택 차량 → 없으면 상위권에서 가장
+    접전인 선수를 자동으로 고른다. 현재 시각(at_time) 이하 데이터만 본다(스포일러 방지).
+    반환한 사실(갭·추세·타이어·DRS·피트·추월확률)을 근거로 사용자 눈높이에 맞춰
+    쉽게 먼저 2~4문장으로 설명하고, 사실과 추론을 구분하라."""
+    import asyncio
+    from ..ml.features import _before, _iso_minus, _num, _seconds_between
+
+    session = current_session()
+    cutoff = current_time()
+
+    # 1) 순위 + 드라이버명 동시 조회
+    positions, drivers = await asyncio.gather(
+        openf1.get_positions(session),
+        openf1.get_drivers(session),
+    )
+    latest: dict[int, tuple] = {}
+    for p in _before(positions, cutoff):
+        dn, pos, d = p.get("driver_number"), p.get("position"), p.get("date")
+        if dn is None or pos is None:
+            continue
+        prev = latest.get(dn)
+        if prev is None or (d or "") >= (prev[0] or ""):
+            latest[dn] = (d, pos)
+    if not latest:
+        return {"available": False, "note": "아직 순위 데이터가 없어요."}
+    order = sorted(latest.items(), key=lambda kv: kv[1][1])
+    pos_of = {dn: pos for dn, (d, pos) in latest.items()}
+    name_of = {d.get("driver_number"): (d.get("full_name") or d.get("name_acronym"))
+               for d in (drivers or [])}
+
+    # 2) subject 선택: 인자 > 선택 차량 > 상위권 최소 갭(후보 intervals 병렬)
+    subject = driver_number or current_selected()
+    if subject is None:
+        cand = [dn for dn, (d, pos) in order[:8] if pos > 1]
+        ivs = await asyncio.gather(*[openf1.get_intervals(session, dn) for dn in cand],
+                                   return_exceptions=True)
+        best = None
+        for dn, ivr in zip(cand, ivs):
+            if isinstance(ivr, Exception):
+                continue
+            iv = _before(ivr, cutoff)
+            g = _num(iv[-1].get("interval")) if iv else None
+            if g is not None and (best is None or g < best[1]):
+                best = (dn, g)
+        subject = best[0] if best else order[0][0]
+    subj_pos = pos_of.get(subject)
+    target = next((dn for dn, (d, pos) in latest.items()
+                   if subj_pos and pos == subj_pos - 1), None)
+
+    # ── 개별 조회 코루틴(병렬 실행용) ──
+    async def _tyre(dn):
+        if not dn:
+            return {"compound": None, "age_laps": None}
+        try:
+            laps = [r for r in _before(await openf1.get_laps(session, dn), cutoff, key="date_start")
+                    if r.get("lap_number") is not None]
+            cur_lap = max((int(r["lap_number"]) for r in laps), default=None)
+            stints = await openf1.get_stints(session, dn)
+            cur = None
+            if cur_lap is not None:
+                for st in stints:
+                    ls, le = st.get("lap_start"), st.get("lap_end")
+                    if ls is not None and ls <= cur_lap and (le is None or cur_lap <= le):
+                        cur = st
+                if cur is None:
+                    started = [st for st in stints if st.get("lap_start") is not None and st["lap_start"] <= cur_lap]
+                    cur = max(started, key=lambda st: st["lap_start"]) if started else None
+            if cur:
+                age = None
+                if cur_lap is not None and cur.get("lap_start") is not None:
+                    age = (cur_lap - int(cur["lap_start"])) + int(cur.get("tyre_age_at_start") or 0)
+                return {"compound": cur.get("compound"), "age_laps": age}
+        except Exception:
+            pass
+        return {"compound": None, "age_laps": None}
+
+    async def _gap_trend(dn):
+        try:
+            iv = _before(await openf1.get_intervals(session, dn), cutoff)
+        except Exception:
+            return None, None
+        gap = trend = None
+        if iv:
+            gap = _num(iv[-1].get("interval"))
+            if gap is not None and iv[-1].get("date"):
+                for r in reversed(iv[:-1]):
+                    if r.get("date") and _seconds_between(r["date"], iv[-1]["date"]) >= 3:
+                        gp = _num(r.get("interval"))
+                        if gp is not None:
+                            trend = ("closing" if gap < gp - 0.05
+                                     else "opening" if gap > gp + 0.05 else "stable")
+                        break
+        return gap, trend
+
+    async def _drs(dn):
+        if not cutoff:
+            return None
+        start = _iso_minus(cutoff, 4)
+        if not start:
+            return None
+        try:
+            cd = [c for c in await openf1.get_car_data_window(session, dn, start, cutoff)
+                  if c.get("date") and c["date"] <= cutoff]
+            return (cd[-1].get("drs") in (10, 12, 14)) if cd else None
+        except Exception:
+            return None
+
+    async def _pit(dn):
+        try:
+            pit = _before(await openf1.get_pit(session, dn), cutoff)
+            return f"최근 피트 {len(pit)}회" if pit else None
+        except Exception:
+            return None
+
+    _PROB_GATE_SEC = 2.5   # 이보다 멀리 있으면(추월 가능성 낮음) 무거운 확률 계산을 생략해 속도↑
+
+    async def _prob(dn, gap):
+        # (C) watcher가 백그라운드로 미리 계산한 확률이 있으면 즉시 사용(재계산 안 함).
+        cached = get_driver_prob(dn)
+        if cached is not None:
+            return cached, "watcher"
+        # 캐시에 없고 '먼 차'면 계산 생략(먼 차의 추월확률은 낮고 계산이 무겁다).
+        if gap is None or gap > _PROB_GATE_SEC:
+            return None, "skipped_far"
+        # 가까운 차만 여기서 계산(다른 조회들과 병렬).
+        try:
+            from ..ml import features as _feat
+            from ..ml import predict as _pred
+            feats = await _feat.build_features(session, cutoff, dn)
+            return _pred.predict(feats).get("overtake_probability"), "computed"
+        except Exception:
+            return None, None
+
+    # 3) 게이팅 판단용 gap 먼저(가벼움), 나머지는 병렬 실행
+    gap, trend = await _gap_trend(subject)
+    drs, subj_tyre, target_tyre, pit_note, (overtake_prob, prob_src) = \
+        await asyncio.gather(
+            _drs(subject), _tyre(subject),
+            _tyre(target), _pit(subject), _prob(subject, gap),
+        )
+
+    return {
+        "available": True,
+        "subject_driver": subject,
+        "subject_name": name_of.get(subject),
+        "subject_position": subj_pos,
+        "ahead_driver": target,
+        "ahead_name": name_of.get(target) if target else None,
+        "gap_to_ahead_sec": round(gap, 2) if gap is not None else None,
+        "gap_trend": trend,
+        "drs_active": drs,
+        "subject_tyre": subj_tyre,
+        "ahead_tyre": target_tyre,
+        "recent_pit": pit_note,
+        "overtake_probability": overtake_prob,
+        "overtake_prob_source": prob_src,
+        "standings_top5": [
+            {"position": pos, "driver": name_of.get(dn) or f"{dn}번", "driver_number": dn}
+            for dn, (d, pos) in order[:5]
+        ],
+        "at_time": cutoff,
+        "note": ("이 사실들을 근거로 '지금 상황 + 전략'을 사용자 눈높이에 맞춰 쉽게 먼저 "
+                 "2~4문장으로 설명하세요. 타이어 신선도 차이(언더컷 가능성)와 갭·추세·DRS로 "
+                 "추월 압박을 엮되, '사실'과 '추론(예상)'을 구분하고, 데이터에 없는 "
+                 "코너링·드라이버 실수는 단정하지 마세요. overtake_probability가 없으면(먼 차) 확률은 "
+                 "언급하지 말고 갭·타이어·DRS로만 설명하세요. 사용자가 '더 자세히/왜'라고 하면 "
+                 "한 단계 더 깊이 설명하세요."),
+    }
+
+
 # ────────────────────────────── 시점 전환 ──────────────────────────────
 
 @tool
@@ -430,5 +608,6 @@ ALL_TOOLS = [
     jump_to_event,
     predict_overtake,
     show_battle_context,
+    explain_situation,
     toggle_drone_view,
 ]

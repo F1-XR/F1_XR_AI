@@ -38,6 +38,7 @@ SYSTEM_PROMPT = """당신은 F1을 처음 보는 사람을 위한 친절한 관�
 - 사용자가 다른 경기(연도·나라·서킷)로 바꾸길 원하면 그때만 find_session을 호출하세요.
 - 항상 도구로 얻은 실제 데이터에 근거해 답하세요. 모르면 모른다고 하세요(지어내지 말 것).
 - 초등학생도 이해할 만큼 쉽고, 존댓말로 설명하세요.
+- 기본은 쉽고 짧게 답하고, 사용자가 "더 자세히·왜·무슨 뜻이야"라고 하면 그때 한 단계 더 깊이 풀어서 설명하세요(입문자 눈높이는 유지, 전문용어는 풀어서).
 - ⚠️ 답변은 음성(TTS)으로 읽어줍니다. 그러니 **2~3문장, 최대 60자 안팎**으로 아주 짧게 핵심만 말하세요.
   글머리표(-)·번호 목록·긴 나열은 쓰지 마세요(음성엔 부적합). 한 호흡에 들리게 간결하게.
   더 알려줄 게 있으면 "더 설명해드릴까요?"처럼 한 줄로 물어보고 멈추세요.
@@ -45,6 +46,7 @@ SYSTEM_PROMPT = """당신은 F1을 처음 보는 사람을 위한 친절한 관�
 - 선수는 약칭(VER)이 아니라 한국어 전체 이름(예: 막스 베르스타펜)으로 말하세요. 순위는 도구가 준 standings 값을 그대로 쓰고 지어내지 마세요.
 - 선수를 언급하면 필요 시 highlight_driver로 화면에서 함께 짚어주세요.
 - 두 차의 근접·추월 압박(간격/추세/DRS)을 물으면 show_battle_context로 두 차 사이에 공간 표시(Gap Line+배지)를 함께 띄우세요.
+- "지금 상황 어때?", "무슨 전략이야?", "경기 흐름/전략 설명해줘"처럼 상황과 전략을 종합해 설명해야 하면 explain_situation을 호출하고, 그 결과(갭·타이어·DRS·추월확률)를 근거로 쉽게 먼저 2~4문장으로 해설하세요.
 - "천천히 다시 보여줘"처럼 여러 동작이 섞인 요청은 도구를 순서대로 여러 번 호출하세요.
   예: "그 추월 장면 직전으로 돌아가서 천천히 보여줘" →
   jump_to_event(event_type="first_overtake_before") 호출 후
@@ -87,13 +89,19 @@ def _context_message() -> str | None:
 
 
 def build_agent():
-    llm = ChatOpenAI(
+    # 추론(reasoning) 모델의 '생각'을 요청 단위로 끈다. 생각 토큰이 max_tokens를 소진해
+    # 최종 답(content)이 비는 문제를 막는다. 공유 서버 설정이 아니라 이 클라이언트 요청에만
+    # 적용된다(vLLM/Qwen: chat_template_kwargs.enable_thinking=false).
+    llm_kwargs = dict(
         model=settings.llm_model,
         temperature=settings.llm_temperature,
         api_key=settings.openai_api_key or None,
         base_url=settings.llm_base_url or None,   # 로컬/호환 엔드포인트면 그쪽으로(비우면 OpenAI)
         max_tokens=settings.llm_max_tokens,       # 음성 답변용 상한(장황 방지·잘림 방지 균형)
     )
+    if settings.llm_disable_thinking:
+        llm_kwargs["extra_body"] = {"chat_template_kwargs": {"enable_thinking": False}}
+    llm = ChatOpenAI(**llm_kwargs)
     # SYSTEM_PROMPT는 run_agent에서 '동적 관람 맥락'과 합쳐 하나의 system 메시지로
     # 주입한다. 여기서 prompt=로 또 넣으면 system 메시지가 둘이 되므로 넣지 않는다.
     return create_react_agent(llm, ALL_TOOLS)
