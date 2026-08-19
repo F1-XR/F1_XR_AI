@@ -367,6 +367,26 @@ async def show_battle_context(driver_number: int) -> dict:
                         trend = "opening"
                 break
 
+    # 2.5) 3초 뒤 갭 예측 — 최근 ~6초 간격 흐름의 기울기로 선형 외삽(등속 가정, 정직한 단순모델)
+    horizon = 3.0
+    predicted_gap = None
+    if iv and gap is not None and iv[-1].get("date"):
+        t_end = iv[-1]["date"]
+        pts = []
+        for r in iv:
+            d, g = r.get("date"), _num(r.get("interval"))
+            if d and g is not None:
+                dt = -_seconds_between(d, t_end)   # 과거일수록 음수, 최신=0
+                if dt >= -6.0:
+                    pts.append((dt, g))
+        if len(pts) >= 2:
+            n = len(pts)
+            sx = sum(t for t, _ in pts); sy = sum(g for _, g in pts)
+            sxx = sum(t * t for t, _ in pts); sxy = sum(t * g for t, g in pts)
+            denom = n * sxx - sx * sx
+            slope = (n * sxy - sx * sy) / denom if abs(denom) > 1e-9 else 0.0   # d(gap)/dt
+            predicted_gap = max(0.0, round(gap + slope * horizon, 2))           # 3초 뒤 예측 갭
+
     # 3) DRS — subject의 car_data 창(현재 시각 근처). drs 코드 10/12/14 = 작동 중.
     drs = False
     if cutoff:
@@ -387,6 +407,8 @@ async def show_battle_context(driver_number: int) -> dict:
         subject_driver=driver_number,
         target_driver=target,
         gap_seconds=round(gap, 2) if gap is not None else 0.0,
+        predicted_gap_seconds=predicted_gap,      # 3초 뒤 예측 갭(없으면 None → Unity 화살표 생략)
+        predict_horizon_sec=horizon,
         trend=trend,
         drs=bool(drs),
         confidence=round(conf, 2),
@@ -399,7 +421,11 @@ async def show_battle_context(driver_number: int) -> dict:
         "gap_seconds": round(gap, 2) if gap is not None else None,
         "trend": trend,
         "drs": bool(drs),
-        "note": "두 차 사이에 Gap Line과 배지를 표시했어요. 이 수치를 바탕으로 한두 문장으로 짧게 설명하세요.",
+        "predicted_gap_seconds": predicted_gap,
+        "predict_horizon_sec": horizon,
+        "note": ("두 차 사이에 Gap Line·배지·예측 화살표를 표시했어요. 현재 갭과 함께 "
+                 "predicted_gap_seconds가 있으면 '지금 X초, 3초 뒤 Y초로 좁혀질(벌어질) 것 같아요'처럼 "
+                 "예측을 한 문장 덧붙이세요(사실 X / 예측 Y 구분). 없으면 예측은 언급하지 마세요."),
     }
 
 
