@@ -47,6 +47,7 @@ SYSTEM_PROMPT = """당신은 F1을 처음 보는 사람을 위한 친절한 관�
 - 선수는 약칭(VER)이 아니라 한국어 전체 이름(예: 막스 베르스타펜)으로 말하세요. 순위는 도구가 준 standings 값을 그대로 쓰고 지어내지 마세요.
 - 선수를 언급하면 필요 시 highlight_driver로 화면에서 함께 짚어주세요.
 - 두 차의 근접·추월 압박(간격/추세/DRS)을 물으면 show_battle_context로 두 차 사이에 공간 표시(Gap Line+배지)를 함께 띄우세요.
+- "지금 공격해도 돼?", "어떻게 해야 해?", "추월 시도할까?"처럼 행동 추천을 물으면 recommend_battle_action을 호출하세요. 결정은 도구 결과의 action/reason을 따르고 지어내지 마세요.
 - "지금 상황 어때?", "무슨 전략이야?", "경기 흐름/전략 설명해줘"처럼 상황과 전략을 종합해 설명해야 하면 explain_situation을 호출하고, 그 결과(갭·타이어·DRS·추월확률)를 근거로 쉽게 먼저 2~4문장으로 해설하세요.
 - "천천히 다시 보여줘"처럼 여러 동작이 섞인 요청은 도구를 순서대로 여러 번 호출하세요.
   예: "그 추월 장면 직전으로 돌아가서 천천히 보여줘" →
@@ -208,6 +209,19 @@ def _battle_sentence(d: dict) -> str:
             f"{fc}{drs} 두 차 사이를 화면에 표시했어요.")
 
 
+def _battle_action_sentence(d: dict) -> str:
+    label = {
+        "PRESS_ATTACK": "지금은 공격 압박을 걸 만해요.",
+        "WAIT_FOR_DRS": "바로 공격보다 DRS 구간을 기다리는 게 좋아요.",
+        "HOLD_POSITION": "지금은 무리하지 말고 위치를 지키는 편이 좋아요.",
+        "HOLD_PRESSURE": "공격보다는 압박을 유지하는 흐름이 좋아요.",
+        "LOW_CONFIDENCE": "지금은 판단이 불확실해서 보수적으로 보는 게 좋아요.",
+        "NO_TARGET": "앞차 배틀 상대를 찾지 못했어요.",
+    }.get(d.get("action"), "상황을 보고 보수적으로 판단하는 게 좋아요.")
+    reason = d.get("reason")
+    return f"{label} {reason}" if reason else label
+
+
 def _concept_sentence(d: dict) -> str | None:
     term, explanation = d.get("term"), d.get("explanation")
     if not explanation:
@@ -261,18 +275,22 @@ def _salvage_from_tools(messages: list, text: str = "") -> str | None:
             strings.append(m.content.strip())
 
     battle = next((d for d in dicts if d.get("gap_seconds") is not None), None)
+    battle_action = next((d for d in dicts if d.get("action") and "inputs" in d), None)
     driver = next((d for d in dicts if d.get("name")), None)
     concept = next((d for d in dicts if d.get("term") and "explanation" in d), None)
     race_status = next((d for d in dicts if "standings" in d or "latest_flag" in d), None)
     why = next((d for d in dicts if "pit_stops" in d or "tire_stints" in d or "recent_gap" in d), None)
 
     want_battle = any(k in text for k in ("갭", "간격", "차이", "붙", "앞차", "배틀", "추격", "따라"))
+    want_action = any(k in text for k in ("공격", "압박", "시도", "해야", "해도", "추월할까", "어떻게해야"))
     want_name = any(k in text for k in ("누구", "이름"))
     want_status = any(k in text for k in ("몇 등", "몇등", "1등", "일등", "순위", "상황"))
     want_why = "왜" in text
     want_concept = any(k in text for k in ("뭐야", "무엇", "뜻", "설명"))
 
     # 1) 질문 의도에 맞는 결과 우선
+    if want_action and battle_action:
+        return _battle_action_sentence(battle_action)
     if want_battle and battle:
         return _battle_sentence(battle)
     if want_name and driver:
@@ -286,6 +304,8 @@ def _salvage_from_tools(messages: list, text: str = "") -> str | None:
     # 2) 의도가 모호하면 이름 → 배틀 순
     if driver:
         return _driver_sentence(driver)
+    if battle_action:
+        return _battle_action_sentence(battle_action)
     if battle:
         return _battle_sentence(battle)
     if why:

@@ -13,7 +13,7 @@ from typing import Any
 
 from .commands import drain, emit_command, start_capture
 from .context import current_selected, current_time
-from .tools import get_driver_info, jump_to_event, show_battle_context
+from .tools import get_driver_info, jump_to_event, recommend_battle_action, show_battle_context
 
 
 @dataclass(frozen=True)
@@ -76,13 +76,17 @@ def build_command_plan(text: str, selected_driver: int | None = None) -> list[Pl
     Returns an empty list when the utterance is better left to the LLM agent.
     """
     t = _compact(text)
+    driver = _driver_from_text(text) or selected_driver
+    action_words = ("공격", "압박", "시도", "해야", "해도돼", "들어가", "붙어", "밀어붙", "추월할까")
+    if driver and any(k in t for k in action_words) and any(k in t for k in ("추월", "공격", "압박", "앞차")):
+        return [PlanStep("battle_action", {"driver_number": driver})]
+
     # 설명·질문형(상황/전략/왜/추월 가능성 등)은 결정적 라우터가 가로채지 말고 LLM 도구에 맡긴다.
     # (explain_situation·explain_why·predict_overtake가 처리해야 하는데 highlight로 새는 것 방지)
     _ASK = ("전략", "상황", "왜", "설명", "어때", "추월할", "추월가능", "추월확률", "추월할까", "가능성", "무슨전략")
     _CMD = ("장면", "돌아", "직전", "천천히", "느리게", "멈춰", "정지", "드론", "강조")
     if any(k in t for k in _ASK) and not any(k in t for k in _CMD):
         return []
-    driver = _driver_from_text(text) or selected_driver
     steps: list[PlanStep] = []
 
     wants_visual_driver = bool(driver and (_mentions_selected(text) or f"{driver}번" in text))
@@ -210,6 +214,13 @@ async def execute_command_plan(steps: list[PlanStep]) -> tuple[str, list[dict], 
             else:
                 ok = False
                 reply_parts.append((data or {}).get("note", "배틀 상황을 찾지 못했어요."))
+        elif step.kind == "battle_action":
+            data = await recommend_battle_action.ainvoke(step.args)
+            if isinstance(data, dict) and data.get("available"):
+                reply_parts.append(_battle_action_reply(data))
+            else:
+                ok = False
+                reply_parts.append((data or {}).get("reason", "행동 추천을 계산하지 못했어요."))
         elif step.kind == "seek_event":
             msg = await jump_to_event.ainvoke(step.args)
             if "찾지 못했어요" in msg:
@@ -250,6 +261,19 @@ async def execute_command_plan(steps: list[PlanStep]) -> tuple[str, list[dict], 
 
     commands = normalize_command_order(drain())
     return _merge_reply(reply_parts), commands, ok and bool(commands)
+
+
+def _battle_action_reply(data: dict[str, Any]) -> str:
+    label = {
+        "PRESS_ATTACK": "지금은 공격 압박을 걸 만해요.",
+        "WAIT_FOR_DRS": "바로 공격보다 DRS 구간을 기다리는 게 좋아요.",
+        "HOLD_POSITION": "지금은 무리하지 말고 위치를 지키는 편이 좋아요.",
+        "HOLD_PRESSURE": "공격보다는 압박을 유지하는 흐름이 좋아요.",
+        "LOW_CONFIDENCE": "지금은 판단이 불확실해서 보수적으로 보는 게 좋아요.",
+        "NO_TARGET": "앞차 배틀 상대를 찾지 못했어요.",
+    }.get(data.get("action"), "상황을 보고 보수적으로 판단하는 게 좋아요.")
+    reason = data.get("reason")
+    return f"{label} {reason}" if reason else label
 
 
 def _merge_reply(parts: list[str]) -> str:

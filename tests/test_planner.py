@@ -26,6 +26,17 @@ def test_selected_battle_plan():
     assert _kinds("앞차랑 얼마나 붙었어?", selected=44) == ["battle_context"]
 
 
+def test_selected_battle_action_plan():
+    steps = build_command_plan("앞차 추월 시도해도 돼?", selected_driver=44)
+    assert [(s.kind, s.args) for s in steps] == [
+        ("battle_action", {"driver_number": 44}),
+    ]
+
+
+def test_general_overtake_probability_still_uses_llm_route():
+    assert build_command_plan("추월 가능성 있어?", selected_driver=44) == []
+
+
 def test_control_and_drone_plan():
     assert build_command_plan("멈춰")[0].args == {"action": "pause", "value": None}
     assert build_command_plan("드론 시점으로 바꿔줘")[0].args == {"on": True}

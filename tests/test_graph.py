@@ -51,3 +51,18 @@ async def test_run_agent_error_discards_partial_commands(monkeypatch):
     reply, commands, _ = await graph.run_agent("해밀턴 강조", session_key=9523)
     assert "죄송" in reply
     assert commands == []
+
+
+def test_salvage_battle_action_result():
+    messages = [
+        _Msg("앞차 추월 시도해도 돼?", type="human"),
+        _Msg({
+            "available": True,
+            "action": "PRESS_ATTACK",
+            "reason": "DRS 범위 안이고 갭이 더 좁혀질 가능성이 있어요.",
+            "inputs": {"gap_seconds": 0.8},
+        }, type="tool"),
+    ]
+    reply = graph._salvage_from_tools(messages, "앞차 추월 시도해도 돼?")
+    assert "공격 압박" in reply
+    assert "DRS" in reply

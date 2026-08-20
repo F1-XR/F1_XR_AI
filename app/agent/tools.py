@@ -369,22 +369,85 @@ async def show_battle_context(driver_number: int) -> dict:
                         trend = "opening"
                 break
 
-    # 2.5) 3초 뒤 갭 예측 — 칼만 상태추정(등속 모델 + 불확실성). 선형 외삽을 대체한다.
-    #   각 intervals 관측을 시각(초, 최신=0)으로 넣어 상태[gap, gap_rate]를 추정하고
-    #   horizon 초 뒤 갭을 (평균, ±std)로 예측한다. std = 불확실성(Battle Lens 밴드/보정용).
+    def _nearest_relative_speed(
+        when_iso: str,
+        subject_car: list[dict],
+        target_car: list[dict],
+        max_dt: float = 1.5,
+    ) -> float | None:
+        """subject speed - target speed near when_iso.
+
+        This is the second sensor for Feature 1-B. It must be relative speed
+        between the two battle cars, not the existing ML feature's own-car
+        speed-vs-past-speed delta.
+        """
+        best_subject = None
+        best_subject_dt = None
+        for row in subject_car:
+            d = row.get("date")
+            sp = _num(row.get("speed"))
+            if not d or sp is None:
+                continue
+            dt = abs(_seconds_between(d, when_iso))
+            if dt <= max_dt and (best_subject_dt is None or dt < best_subject_dt):
+                best_subject = (d, sp)
+                best_subject_dt = dt
+        if best_subject is None:
+            return None
+
+        best_target_sp = None
+        best_target_dt = None
+        for row in target_car:
+            d = row.get("date")
+            sp = _num(row.get("speed"))
+            if not d or sp is None:
+                continue
+            dt = abs(_seconds_between(d, best_subject[0]))
+            if dt <= max_dt and (best_target_dt is None or dt < best_target_dt):
+                best_target_sp = sp
+                best_target_dt = dt
+        if best_target_sp is None:
+            return None
+        return float(best_subject[1] - best_target_sp)
+
+    # 2.5) 3초 뒤 갭 예측 — 칼만 상태추정(등속 모델 + 불확실성).
+    #   Feature 1-A: intervals gap만으로 상태[gap, gap_rate] 추정.
+    #   Feature 1-B: car_data의 subject-target 상대속도를 약한 두 번째 센서로 융합.
     horizon = 3.0
     predicted_gap = None
     predicted_gap_std = None
+    fusion_used = False
+    relative_speed_kmh = None
+    subject_car_data: list[dict] = []
+    target_car_data: list[dict] = []
+    car_data_end = cutoff or (iv[-1].get("date") if iv else None)
+    if car_data_end:
+        start = _iso_minus(car_data_end, 8)
+        if start:
+            subject_car_data = [
+                c for c in await openf1.get_car_data_window(session, driver_number, start, car_data_end)
+                if c.get("date") and c["date"] <= car_data_end
+            ]
+            target_car_data = [
+                c for c in await openf1.get_car_data_window(session, target, start, car_data_end)
+                if c.get("date") and c["date"] <= car_data_end
+            ]
+
     if iv and gap is not None and iv[-1].get("date"):
         from ..ml.state_estimator import GapEstimator
         t_end = iv[-1]["date"]
-        est = GapEstimator()          # gap-only(A). speed_delta 융합(B)은 상위에서 확장 가능.
+        est = GapEstimator(fuse_speed_delta=bool(subject_car_data and target_car_data))
         used = 0
         for r in iv:
             d, g = r.get("date"), _num(r.get("interval"))
             if d and g is not None:
                 t_rel = -_seconds_between(d, t_end)   # 과거 음수, 최신 0 (단조 증가)
                 est.observe(t_rel, g)
+                speed_delta = _nearest_relative_speed(d, subject_car_data, target_car_data)
+                if speed_delta is not None:
+                    est.observe_speed_delta(t_rel, speed_delta)
+                    fusion_used = True
+                    relative_speed_kmh = speed_delta
                 used += 1
         if used >= 2 and est.ready:
             mean, std = est.predict(horizon)
@@ -393,13 +456,8 @@ async def show_battle_context(driver_number: int) -> dict:
 
     # 3) DRS — subject의 car_data 창(현재 시각 근처). drs 코드 10/12/14 = 작동 중.
     drs = False
-    if cutoff:
-        start = _iso_minus(cutoff, 4)
-        if start:
-            cd = [c for c in await openf1.get_car_data_window(session, driver_number, start, cutoff)
-                  if c.get("date") and c["date"] <= cutoff]
-            if cd:
-                drs = cd[-1].get("drs") in (10, 12, 14)
+    if subject_car_data:
+        drs = subject_car_data[-1].get("drs") in (10, 12, 14)
 
     # 4) confidence(간단 휴리스틱): 가깝고 좁혀질수록 높게
     conf = 0.0
@@ -414,10 +472,13 @@ async def show_battle_context(driver_number: int) -> dict:
         predicted_gap_seconds=predicted_gap,      # 3초 뒤 예측 갭(없으면 None → Unity 화살표 생략)
         predicted_gap_std_seconds=predicted_gap_std,   # 예측 불확실성(±초). Unity가 밴드/투명도로 사용 가능
         predict_horizon_sec=horizon,
+        fusion_used=fusion_used,
+        relative_speed_kmh=round(relative_speed_kmh, 1) if relative_speed_kmh is not None else None,
         trend=trend,
         drs=bool(drs),
         confidence=round(conf, 2),
-        reason="앞차와의 간격·추세·DRS 기반(칼만 상태추정)",
+        reason=("앞차와의 간격·추세·DRS·상대속도 기반(센서 융합 칼만 상태추정)"
+                if fusion_used else "앞차와의 간격·추세·DRS 기반(칼만 상태추정)"),
     )
     return {
         "shown": True,
@@ -429,9 +490,62 @@ async def show_battle_context(driver_number: int) -> dict:
         "predicted_gap_seconds": predicted_gap,
         "predicted_gap_std_seconds": predicted_gap_std,
         "predict_horizon_sec": horizon,
+        "fusion_used": fusion_used,
+        "relative_speed_kmh": round(relative_speed_kmh, 1) if relative_speed_kmh is not None else None,
         "note": ("두 차 사이에 Gap Line·배지·예측 화살표를 표시했어요. 현재 갭과 함께 "
                  "predicted_gap_seconds가 있으면 '지금 X초, 3초 뒤 Y초로 좁혀질(벌어질) 것 같아요'처럼 "
-                 "예측을 한 문장 덧붙이세요(사실 X / 예측 Y 구분). 없으면 예측은 언급하지 마세요."),
+                 "예측을 한 문장 덧붙이세요(사실 X / 예측 Y 구분). fusion_used가 True면 "
+                 "'차량 속도 데이터까지 함께 반영했다'고 덧붙일 수 있습니다. 없으면 예측은 언급하지 마세요."),
+    }
+
+
+@tool
+async def recommend_battle_action(driver_number: int) -> dict:
+    """Battle Decision Lite.
+
+    지정 드라이버가 앞차를 상대로 지금 공격해야 할지, DRS를 기다려야 할지,
+    압박만 유지해야 할지 결정론적 정책으로 추천한다. LLM이 결정을 지어내지 않도록
+    상태추정(Kalman gap prediction), 불확실성, DRS, gap trend, 보정된 추월확률을
+    근거로 action label과 이유를 반환한다.
+    """
+    battle = await show_battle_context.ainvoke({"driver_number": driver_number})
+    if not isinstance(battle, dict) or not battle.get("shown"):
+        return {
+            "available": False,
+            "driver_number": driver_number,
+            "action": "NO_TARGET",
+            "confidence": 0.0,
+            "reason": (battle or {}).get("note", "앞차 배틀 상대를 찾지 못했어요."),
+        }
+
+    overtake_probability = None
+    try:
+        pred = await predict_overtake.ainvoke({"driver_number": driver_number})
+        if isinstance(pred, dict) and pred.get("available", True) is not False:
+            overtake_probability = pred.get("overtake_probability")
+    except Exception:
+        logger.exception("battle action probability lookup failed")
+
+    from ..ml.decision_policy import recommend_battle_policy
+
+    policy = recommend_battle_policy(
+        gap_seconds=battle.get("gap_seconds"),
+        predicted_gap_seconds=battle.get("predicted_gap_seconds"),
+        predicted_gap_std_seconds=battle.get("predicted_gap_std_seconds"),
+        trend=battle.get("trend"),
+        drs=bool(battle.get("drs")),
+        fusion_used=bool(battle.get("fusion_used")),
+        relative_speed_kmh=battle.get("relative_speed_kmh"),
+        overtake_probability=overtake_probability,
+    )
+
+    return {
+        "available": True,
+        "driver_number": driver_number,
+        "target_driver": battle.get("target_driver"),
+        **policy,
+        "note": ("이 결정은 LLM 추측이 아니라 deterministic policy 결과입니다. "
+                 "답변할 때 '공격 추천/대기/유지'를 먼저 말하고, 근거는 갭·DRS·예측 불확실성 중심으로 짧게 설명하세요."),
     }
 
 
@@ -640,6 +754,7 @@ ALL_TOOLS = [
     jump_to_event,
     predict_overtake,
     show_battle_context,
+    recommend_battle_action,
     explain_situation,
     toggle_drone_view,
 ]
