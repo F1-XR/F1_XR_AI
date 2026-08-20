@@ -369,27 +369,27 @@ async def show_battle_context(driver_number: int) -> dict:
                         trend = "opening"
                 break
 
-    # 2.5) 3초 뒤 갭 예측 — 최근 ~6초 간격 흐름의 기울기로 선형 외삽(등속 가정, 정직한 단순모델)
+    # 2.5) 3초 뒤 갭 예측 — 칼만 상태추정(등속 모델 + 불확실성). 선형 외삽을 대체한다.
+    #   각 intervals 관측을 시각(초, 최신=0)으로 넣어 상태[gap, gap_rate]를 추정하고
+    #   horizon 초 뒤 갭을 (평균, ±std)로 예측한다. std = 불확실성(Battle Lens 밴드/보정용).
     horizon = 3.0
     predicted_gap = None
+    predicted_gap_std = None
     if iv and gap is not None and iv[-1].get("date"):
+        from ..ml.state_estimator import GapEstimator
         t_end = iv[-1]["date"]
-        pts = []
+        est = GapEstimator()          # gap-only(A). speed_delta 융합(B)은 상위에서 확장 가능.
+        used = 0
         for r in iv:
             d, g = r.get("date"), _num(r.get("interval"))
             if d and g is not None:
-                dt = -_seconds_between(d, t_end)   # 과거일수록 음수, 최신=0
-                if dt >= -6.0:
-                    pts.append((dt, g))
-        if len(pts) >= 2:
-            n = len(pts)
-            sx = sum(t for t, _ in pts); sy = sum(g for _, g in pts)
-            sxx = sum(t * t for t, _ in pts); sxy = sum(t * g for t, g in pts)
-            denom = n * sxx - sx * sx
-            slope = (n * sxy - sx * sy) / denom if abs(denom) > 1e-9 else 0.0   # d(gap)/dt
-            # 노이즈 큰 기울기가 비현실적 예측(예: 15초)을 내지 않도록 3초 변화량을 ±2.0초로 제한.
-            delta = max(-2.0, min(2.0, slope * horizon))
-            predicted_gap = max(0.0, round(gap + delta, 2))                     # 3초 뒤 예측 갭
+                t_rel = -_seconds_between(d, t_end)   # 과거 음수, 최신 0 (단조 증가)
+                est.observe(t_rel, g)
+                used += 1
+        if used >= 2 and est.ready:
+            mean, std = est.predict(horizon)
+            predicted_gap = round(mean, 2)            # 3초 뒤 예측 갭(칼만 평균)
+            predicted_gap_std = round(std, 2)         # 예측 불확실성(±초)
 
     # 3) DRS — subject의 car_data 창(현재 시각 근처). drs 코드 10/12/14 = 작동 중.
     drs = False
@@ -412,11 +412,12 @@ async def show_battle_context(driver_number: int) -> dict:
         target_driver=target,
         gap_seconds=round(gap, 2) if gap is not None else 0.0,
         predicted_gap_seconds=predicted_gap,      # 3초 뒤 예측 갭(없으면 None → Unity 화살표 생략)
+        predicted_gap_std_seconds=predicted_gap_std,   # 예측 불확실성(±초). Unity가 밴드/투명도로 사용 가능
         predict_horizon_sec=horizon,
         trend=trend,
         drs=bool(drs),
         confidence=round(conf, 2),
-        reason="앞차와의 간격·추세·DRS 기반",
+        reason="앞차와의 간격·추세·DRS 기반(칼만 상태추정)",
     )
     return {
         "shown": True,
@@ -426,6 +427,7 @@ async def show_battle_context(driver_number: int) -> dict:
         "trend": trend,
         "drs": bool(drs),
         "predicted_gap_seconds": predicted_gap,
+        "predicted_gap_std_seconds": predicted_gap_std,
         "predict_horizon_sec": horizon,
         "note": ("두 차 사이에 Gap Line·배지·예측 화살표를 표시했어요. 현재 갭과 함께 "
                  "predicted_gap_seconds가 있으면 '지금 X초, 3초 뒤 Y초로 좁혀질(벌어질) 것 같아요'처럼 "
