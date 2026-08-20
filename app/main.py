@@ -198,6 +198,8 @@ async def ws(websocket: WebSocket):
     # 예측형 능동 안내(watcher) 상태 — heartbeat로 갱신되는 최신 리플레이 상태 + 감시 태스크.
     latest_state: dict = {"v": None}
     watcher_task: asyncio.Task | None = None
+    heartbeat_seen = False
+    last_heartbeat_log_at = 0.0
 
     async def _announce(
         driver_number: int,
@@ -247,7 +249,29 @@ async def ws(websocket: WebSocket):
                 if "is_playing" not in msg and "isPlaying" in msg:
                     msg["is_playing"] = msg["isPlaying"]
                 latest_state["v"] = msg
+                now = time.monotonic()
+                if not heartbeat_seen or (settings.watcher_debug and now - last_heartbeat_log_at >= 2.0):
+                    print(
+                        "[hb] replay_state 수신 "
+                        f"session={msg.get('session_key')} "
+                        f"at_time={msg.get('at_time')} "
+                        f"is_playing={msg.get('is_playing')} "
+                        f"speed={msg.get('playback_speed')} "
+                        f"watcher_enabled={settings.predict_watcher_enabled}",
+                        flush=True,
+                    )
+                    logger.warning(
+                        "[hb] replay_state 수신 session=%s at_time=%s is_playing=%s speed=%s watcher_enabled=%s",
+                        msg.get("session_key"),
+                        msg.get("at_time"),
+                        msg.get("is_playing"),
+                        msg.get("playback_speed"),
+                        settings.predict_watcher_enabled,
+                    )
+                    heartbeat_seen = True
+                    last_heartbeat_log_at = now
                 if settings.predict_watcher_enabled and watcher_task is None:
+                    print("[hb] 첫 replay_state 수신 -> watcher 태스크 시작", flush=True)
                     logger.info("[hb] 첫 replay_state 수신 → watcher 태스크 시작")
                     watcher_task = asyncio.create_task(
                         watch(lambda: latest_state["v"], _announce)

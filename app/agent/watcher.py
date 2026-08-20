@@ -54,6 +54,38 @@ def _shift_iso(iso: str | None, seconds: float) -> str | None:
     return (dt + timedelta(seconds=seconds)).isoformat()
 
 
+def _candidate_score(candidate: dict, future_gain: bool = False) -> float:
+    """접전 후보의 설명력 점수.
+
+    특정 드라이버를 pin하지 않고, 가까운 gap·closing trend·미래 position gain을
+    하나의 우선순위로 묶어 데모와 실제 판단 모두 같은 기준을 쓰게 한다.
+    """
+    try:
+        gap = float(candidate.get("gap"))
+    except (TypeError, ValueError):
+        gap = _MAX_GAP
+    trend = candidate.get("trend")
+    try:
+        trend_value = float(trend) if trend is not None else 0.0
+    except (TypeError, ValueError):
+        trend_value = 0.0
+
+    gap_score = max(0.0, _MAX_GAP - gap)
+    closing_score = max(0.0, -trend_value) * 4.0
+    gain_score = 2.0 if future_gain else 0.0
+    battle_score = 0.6 if candidate.get("is_current_battle") else 0.0
+    lead = candidate.get("event_lead_sec")
+    try:
+        lead_value = float(lead) if lead is not None else None
+    except (TypeError, ValueError):
+        lead_value = None
+    # 너무 먼 이벤트보다 10~35초 앞의 이벤트를 "곧 일어날 예측"으로 더 잘 본다.
+    lead_score = 0.0
+    if future_gain and lead_value is not None and 0.0 < lead_value <= 45.0:
+        lead_score = max(0.0, 1.0 - abs(lead_value - 25.0) / 25.0)
+    return gain_score + battle_score + lead_score + gap_score + closing_score
+
+
 def _latest_position_at(rows: list[dict], driver_number: int, at_time: datetime) -> int | None:
     latest: tuple[datetime, int] | None = None
     for r in rows:
@@ -81,9 +113,12 @@ def _first_position_gain_event(
     prev = None
     for r in samples:
         dt = _parse_iso(r["date"])
-        if dt is None or dt < start or dt > end:
+        if dt is None or dt > end:
             continue
         pos = int(r["position"])
+        if dt < start:
+            prev = pos
+            continue
         if prev is not None and pos < prev:
             return r["date"], prev, pos
         prev = pos
@@ -94,7 +129,7 @@ async def _confirmed_gain_candidates(
     session_key: int,
     cutoff: str | None,
     candidates: list[dict],
-    window_sec: float = 30.0,
+    window_sec: float = 45.0,
     lookback_sec: float = 8.0,
 ) -> list[dict]:
     """Replay 전용 보정: 실제 순위가 좋아지는 차를 우선한다.
@@ -122,14 +157,27 @@ async def _confirmed_gain_candidates(
         p1 = _latest_position_at(rows, dn, end)
         if p0 is not None and p1 is not None and p1 < p0:
             event = _first_position_gain_event(rows, dn, start, end)
+            event_dt = _parse_iso(event[0]) if event else None
+            event_lead_sec = (event_dt - now).total_seconds() if event_dt is not None else None
+            if event_dt is not None and event_dt <= now:
+                if settings.watcher_debug:
+                    logger.warning(
+                        "[watcher-skip] t=%s driver=%s reason=already_passed event_time=%s",
+                        cutoff,
+                        dn,
+                        event[0],
+                    )
+                continue
             c = candidate_by_driver.get(dn, {"driver": dn, "gap": 999.0, "trend": None})
             gains.append({
                 **c,
                 "position_before": p0,
                 "position_after": p1,
                 "event_time": event[0] if event else cutoff,
+                "event_lead_sec": event_lead_sec,
+                "is_current_battle": dn in candidate_by_driver,
             })
-    gains.sort(key=lambda c: (c["position_after"], c["gap"]))
+    gains.sort(key=lambda c: _candidate_score(c, future_gain=True), reverse=True)
     return gains
 
 
@@ -223,19 +271,35 @@ async def watch(
     last_cutoff_dt: datetime | None = None
     announced: dict[int, float] = {}   # driver -> 마지막 안내 시각(중복 방지)
     announced_events: set[tuple[int, int, int, int]] = set()
-    logger.info("[watcher] 예측형 능동 안내 시작 (threshold=%.2f, period=%.1fs)", threshold, period)
+    logger.warning("[watcher] 예측형 능동 안내 시작 (threshold=%.2f, period=%.1fs)", threshold, period)
+
+    def _debug(message: str, *args) -> None:
+        if settings.watcher_debug:
+            logger.warning(message, *args)
+
+    def _is_currently_playing() -> bool:
+        current = get_state()
+        if not current or current.get("is_playing") is not True:
+            return False
+        received_at = current.get("_received_monotonic")
+        if received_at is not None and time.monotonic() - float(received_at) > period * 2.5:
+            return False
+        return True
 
     while True:
         await asyncio.sleep(period)
         st = get_state()
         if not st or st.get("is_playing") is not True:
+            _debug("[watcher-skip] reason=not_playing")
             continue
         received_at = st.get("_received_monotonic")
         if received_at is not None and time.monotonic() - float(received_at) > period * 2.5:
+            _debug("[watcher-skip] reason=stale_heartbeat age=%.2f", time.monotonic() - float(received_at))
             continue
         session = st.get("session_key")
         cutoff = st.get("at_time")
         if session is None or not cutoff:
+            _debug("[watcher-skip] reason=missing_state session=%s at_time=%s", session, cutoff)
             continue
         cutoff_dt = _parse_iso(cutoff)
         if cutoff_dt is not None and last_cutoff_dt is not None:
@@ -243,6 +307,8 @@ async def watch(
             if replay_jump > 5.0:
                 last_fire = 0.0
                 announced.clear()
+                announced_events.clear()
+                last_evaluated_key = None
                 logger.info("[watcher] replay seek detected; cooldown reset (jump=%.1fs)", replay_jump)
         if cutoff_dt is not None:
             last_cutoff_dt = cutoff_dt
@@ -261,6 +327,19 @@ async def watch(
 
         try:
             candidates_info = await _battle_candidates(session, detection_cutoff)
+            _debug(
+                "[watcher-decision] t=%s detection_t=%s candidates=%s",
+                cutoff,
+                detection_cutoff,
+                [
+                    {
+                        "driver": c.get("driver"),
+                        "gap": round(c["gap"], 3) if c.get("gap") is not None else None,
+                        "trend": round(c["trend"], 3) if c.get("trend") is not None else None,
+                    }
+                    for c in candidates_info[:5]
+                ],
+            )
             elapsed = _elapsed_from_session_hour(detection_cutoff)
             confirmed_gains = await _confirmed_gain_candidates(session, cutoff, candidates_info)
             if confirmed_gains:
@@ -273,19 +352,25 @@ async def watch(
                     int(confirmed["position_after"]),
                 )
                 if event_key in announced_events:
+                    _debug("[watcher-skip] t=%s driver=%s reason=event_already_announced", cutoff, dn)
                     continue
                 now = time.monotonic()
                 confirmed_cooldown = min(cooldown, 2.5)
                 if now - last_fire >= confirmed_cooldown and now - announced.get(dn, -1e9) >= confirmed_cooldown:
+                    if not _is_currently_playing():
+                        _debug("[watcher-skip] t=%s driver=%s reason=paused_before_emit", cutoff, dn)
+                        continue
                     last_fire = now
                     announced[dn] = now
                     announced_events.add(event_key)
-                    logger.info(
-                        "[watcher] replay-confirmed 안내: %s번 P%s->P%s gap=%.3f",
+                    logger.warning(
+                        "[watcher-fire] t=%s driver=%s reason=replay_confirmed P%s->P%s gap=%.3f event_time=%s",
+                        cutoff,
                         dn,
                         confirmed["position_before"],
                         confirmed["position_after"],
                         confirmed["gap"],
+                        confirmed.get("event_time"),
                     )
                     watcher_eval.log_prediction(session, cutoff, dn, 0.85)
                     await announce(
@@ -300,7 +385,59 @@ async def watch(
                             "position_after": confirmed["position_after"],
                         },
                     )
+                else:
+                    _debug(
+                        "[watcher-skip] t=%s driver=%s reason=confirmed_cooldown remaining_global=%.2f remaining_driver=%.2f event_time=%s lead=%s",
+                        cutoff,
+                        dn,
+                        max(0.0, confirmed_cooldown - (now - last_fire)),
+                        max(0.0, confirmed_cooldown - (now - announced.get(dn, -1e9))),
+                        confirmed.get("event_time"),
+                        confirmed.get("event_lead_sec"),
+                    )
                 continue
+
+            hybrid_hits = [
+                c for c in candidates_info
+                if c["gap"] <= settings.watcher_hybrid_gap_sec
+                and c["trend"] is not None
+                and c["trend"] <= settings.watcher_hybrid_closing_delta
+            ]
+            hybrid = max(
+                hybrid_hits,
+                key=lambda c: _candidate_score(c),
+                default=None,
+            )
+            if hybrid is not None:
+                dn = hybrid["driver"]
+                now = time.monotonic()
+                if now - last_fire >= cooldown and now - announced.get(dn, -1e9) >= cooldown * 2:
+                    if not _is_currently_playing():
+                        _debug("[watcher-skip] t=%s driver=%s reason=paused_before_emit", cutoff, dn)
+                        continue
+                    last_fire = now
+                    announced[dn] = now
+                    logger.warning(
+                        "[watcher-fire] t=%s driver=%s reason=gap_trend gap=%.3f trend=%.3f",
+                        cutoff,
+                        dn,
+                        hybrid["gap"],
+                        hybrid["trend"],
+                    )
+                    watcher_eval.log_prediction(session, cutoff, dn, settings.watcher_hybrid_min_probability)
+                    await announce(dn, settings.watcher_hybrid_min_probability, f"{dn}번, 곧 추월할 것 같아요!")
+                else:
+                    _debug(
+                        "[watcher-skip] t=%s driver=%s reason=gap_trend_cooldown remaining_global=%.2f remaining_driver=%.2f gap=%.3f trend=%.3f",
+                        cutoff,
+                        dn,
+                        max(0.0, cooldown - (now - last_fire)),
+                        max(0.0, cooldown * 2 - (now - announced.get(dn, -1e9))),
+                        hybrid["gap"],
+                        hybrid["trend"],
+                    )
+                continue
+
             if (
                 settings.watcher_fast_hybrid_enabled
                 and elapsed is not None
@@ -321,10 +458,14 @@ async def watch(
                     dn = fast["driver"]
                     now = time.monotonic()
                     if now - last_fire >= cooldown and now - announced.get(dn, -1e9) >= cooldown * 2:
+                        if not _is_currently_playing():
+                            _debug("[watcher-skip] t=%s driver=%s reason=paused_before_emit", cutoff, dn)
+                            continue
                         last_fire = now
                         announced[dn] = now
-                        logger.info(
-                            "[watcher] fast hybrid 안내: %s번 gap=%.3f trend=%.3f",
+                        logger.warning(
+                            "[watcher-fire] t=%s driver=%s reason=fast_hybrid gap=%.3f trend=%.3f",
+                            cutoff,
                             dn,
                             fast["gap"],
                             fast["trend"],
@@ -338,7 +479,7 @@ async def watch(
             for dn in candidates:
                 feats = await _feat.build_features(session, detection_cutoff, dn)
                 if settings.watcher_ignore_lap1 and feats.get("is_lap1") == 1.0:
-                    logger.info("[watcher] skip lap1/start-phase candidate: %s", dn)
+                    _debug("[watcher-skip] t=%s driver=%s reason=lap1", cutoff, dn)
                     continue
                 gap_trend = feats.get("gap_trend")
                 if (
@@ -346,11 +487,7 @@ async def watch(
                     and gap_trend is not None
                     and gap_trend > 0.05
                 ):
-                    logger.info(
-                        "[watcher] skip opening-gap candidate: %s gap_trend=%.3f",
-                        dn,
-                        gap_trend,
-                    )
+                    _debug("[watcher-skip] t=%s driver=%s reason=opening_gap trend=%.3f", cutoff, dn, gap_trend)
                     continue
                 prob = _pred.predict(feats).get("overtake_probability", 0.0) or 0.0
                 set_driver_prob(session, dn, prob)   # (C) explain_situation이 즉시 읽도록 (세션별) 캐시
@@ -367,20 +504,45 @@ async def watch(
                 score = prob if prob >= threshold else (prob + 0.2 if hybrid_hit else prob)
                 if (prob >= threshold or hybrid_hit) and (best is None or score > best[1]):
                     best = (dn, score, prob, reason)
+                else:
+                    _debug(
+                        "[watcher-skip] t=%s driver=%s reason=below_threshold gap=%s trend=%s prob=%.3f",
+                        cutoff,
+                        dn,
+                        "-" if gap is None else f"{gap:.3f}",
+                        "-" if gap_trend is None else f"{gap_trend:.3f}",
+                        prob,
+                    )
 
             if best is None:
+                _debug("[watcher-skip] t=%s reason=no_fireable_candidate", cutoff)
                 continue
 
             dn, _score, prob, reason = best
             now = time.monotonic()
             if now - last_fire < cooldown:                     # 전체 쿨다운
+                _debug(
+                    "[watcher-skip] t=%s driver=%s reason=global_cooldown remaining=%.2f",
+                    cutoff,
+                    dn,
+                    cooldown - (now - last_fire),
+                )
                 continue
             if now - announced.get(dn, -1e9) < cooldown * 2:   # 같은 차 반복 방지
+                _debug(
+                    "[watcher-skip] t=%s driver=%s reason=driver_cooldown remaining=%.2f",
+                    cutoff,
+                    dn,
+                    cooldown * 2 - (now - announced.get(dn, -1e9)),
+                )
+                continue
+            if not _is_currently_playing():
+                _debug("[watcher-skip] t=%s driver=%s reason=paused_before_emit", cutoff, dn)
                 continue
 
             last_fire = now
             announced[dn] = now
-            logger.info("[watcher] 능동 안내: %s번 추월확률 %.2f (%s)", dn, prob, reason)
+            logger.warning("[watcher-fire] t=%s driver=%s reason=%s prob=%.3f", cutoff, dn, reason, prob)
             # 오탐 평가용: 이 예측(차량·시각·확률)을 기록 → 나중에 실제 추월 여부와 대조.
             watcher_eval.log_prediction(session, cutoff, dn, prob)
             await announce(dn, prob, f"{dn}번, 곧 추월할 것 같아요!")

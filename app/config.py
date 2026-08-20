@@ -73,6 +73,7 @@ class Settings(BaseSettings):
     watcher_fast_gap_sec: float = 0.15
     watcher_fast_closing_delta: float = -0.1
     watcher_fast_min_elapsed_sec: float = 300.0
+    watcher_debug: bool = False       # WATCHER_DEBUG=true면 후보/skip/fire 이유를 터미널에 자세히 출력
     # 능동 안내 오탐 평가용 로그. 안내할 때마다 예측(차량·시각·확률)을 jsonl로 적재하고,
     # 나중에 scripts/eval_watcher.py 로 실제 추월 여부와 대조해 오탐률·Precision@K를 집계한다.
     watcher_eval_enabled: bool = True
