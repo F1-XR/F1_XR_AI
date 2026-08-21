@@ -201,11 +201,23 @@ async def ws(websocket: WebSocket):
     heartbeat_seen = False
     last_heartbeat_log_at = 0.0
 
+    def _overtake_window(gap_seconds, gap_trend):
+        """추월까지 남은 시간(초) 추정 = gap ÷ 초당 좁힘량.
+        gap_trend는 약 3초간 Δgap(음수=좁혀짐). 좁혀지는 중일 때만 값, 아니면 None(안 움직임)."""
+        if gap_seconds is None or gap_trend is None:
+            return None
+        closing_per_sec = -gap_trend / 3.0
+        if closing_per_sec <= 0.001:      # 벌어지거나 정체 → 추월 창 없음
+            return None
+        return round(min(gap_seconds / closing_per_sec, 45.0), 1)
+
     async def _announce(
         driver_number: int,
         probability: float,
         message: str,
         event: dict | None = None,
+        gap_seconds: float | None = None,
+        gap_trend: float | None = None,
     ) -> None:
         """watcher가 부르는 콜백 — 그 차에 예측 리본 표시 + 안내 음성(TTS).
 
@@ -221,6 +233,9 @@ async def ws(websocket: WebSocket):
                 "driver_number": driver_number,
                 "probability": round(max(probability, 0.85), 4),
                 "risk_label": "Overtake Risk High",
+                "gap_seconds": round(gap_seconds, 3) if gap_seconds is not None else None,
+                "gap_trend": round(gap_trend, 4) if gap_trend is not None else None,
+                "window_seconds": _overtake_window(gap_seconds, gap_trend),
             },
         })
         await send({"type": "assistant_text", "text": message})
@@ -229,6 +244,26 @@ async def ws(websocket: WebSocket):
             await send({"type": "tts_announce", "format": "wav", "data": audio_b64})
         else:   # TTS 꺼짐/실패 시 자막만
             await send({"type": "assistant_text", "text": message})
+
+    async def _update_gauge(
+        driver_number: int,
+        gap_seconds: float | None,
+        gap_trend: float | None = None,
+    ) -> None:
+        """watcher가 매 주기(0.5s) 부르는 콜백 — 현재 gap을 게이지에 실시간 반영(표시 전용).
+
+        안내(_announce)와 달리 음성/오버레이 없이 gap 숫자만 스트리밍한다.
+        Unity는 HUD가 떠 있고 driver가 일치할 때만 반영하므로, 매번 보내도 안전하다.
+        """
+        await send({
+            "type": "command", "name": "updateOvertakeGauge",
+            "args": {
+                "driver_number": driver_number,
+                "gap_seconds": round(gap_seconds, 3) if gap_seconds is not None else None,
+                "gap_trend": round(gap_trend, 4) if gap_trend is not None else None,
+                "window_seconds": _overtake_window(gap_seconds, gap_trend),
+            },
+        })
 
     try:
         while True:
@@ -274,7 +309,7 @@ async def ws(websocket: WebSocket):
                     print("[hb] 첫 replay_state 수신 -> watcher 태스크 시작", flush=True)
                     logger.info("[hb] 첫 replay_state 수신 → watcher 태스크 시작")
                     watcher_task = asyncio.create_task(
-                        watch(lambda: latest_state["v"], _announce)
+                        watch(lambda: latest_state["v"], _announce, _update_gauge)
                     )
                 continue
 

@@ -251,6 +251,7 @@ async def _battle_candidates(
 async def watch(
     get_state: Callable[[], dict | None],
     announce: Callable[..., Awaitable[None]],
+    update_gauge: Callable[..., Awaitable[None]] | None = None,
 ) -> None:
     """예측형 능동 안내 루프.
 
@@ -327,6 +328,18 @@ async def watch(
 
         try:
             candidates_info = await _battle_candidates(session, detection_cutoff)
+            # 실시간 gap 스트리밍: 매 주기 '가장 붙은' 드라이버의 현재 gap을 게이지로 내려보낸다.
+            # (표시 전용 — Unity는 HUD가 떠 있고 driver가 일치할 때만 반영. 안내/쿨다운과 무관.)
+            if update_gauge is not None and candidates_info:
+                top = candidates_info[0]
+                try:
+                    await update_gauge(
+                        driver_number=int(top["driver"]),
+                        gap_seconds=top.get("gap"),
+                        gap_trend=top.get("trend"),
+                    )
+                except Exception:   # 게이지 갱신 실패가 안내 흐름을 막지 않도록
+                    pass
             _debug(
                 "[watcher-decision] t=%s detection_t=%s candidates=%s",
                 cutoff,
@@ -384,6 +397,7 @@ async def watch(
                             "position_before": confirmed["position_before"],
                             "position_after": confirmed["position_after"],
                         },
+                        gap_seconds=confirmed.get("gap"),
                     )
                 else:
                     _debug(
@@ -425,7 +439,7 @@ async def watch(
                         hybrid["trend"],
                     )
                     watcher_eval.log_prediction(session, cutoff, dn, settings.watcher_hybrid_min_probability)
-                    await announce(dn, settings.watcher_hybrid_min_probability, f"{dn}번, 곧 추월할 것 같아요!")
+                    await announce(dn, settings.watcher_hybrid_min_probability, f"{dn}번, 곧 추월할 것 같아요!", gap_seconds=hybrid.get("gap"), gap_trend=hybrid.get("trend"))
                 else:
                     _debug(
                         "[watcher-skip] t=%s driver=%s reason=gap_trend_cooldown remaining_global=%.2f remaining_driver=%.2f gap=%.3f trend=%.3f",
@@ -471,7 +485,7 @@ async def watch(
                             fast["trend"],
                         )
                         watcher_eval.log_prediction(session, cutoff, dn, settings.watcher_threshold)
-                        await announce(dn, settings.watcher_threshold, f"{dn}번, 곧 추월할 것 같아요!")
+                        await announce(dn, settings.watcher_threshold, f"{dn}번, 곧 추월할 것 같아요!", gap_seconds=fast.get("gap"), gap_trend=fast.get("trend"))
                     continue
 
             candidates = [c["driver"] for c in candidates_info]
@@ -545,7 +559,12 @@ async def watch(
             logger.warning("[watcher-fire] t=%s driver=%s reason=%s prob=%.3f", cutoff, dn, reason, prob)
             # 오탐 평가용: 이 예측(차량·시각·확률)을 기록 → 나중에 실제 추월 여부와 대조.
             watcher_eval.log_prediction(session, cutoff, dn, prob)
-            await announce(dn, prob, f"{dn}번, 곧 추월할 것 같아요!")
+            _gi = next((c for c in candidates_info if c.get("driver") == dn), None)
+            await announce(
+                dn, prob, f"{dn}번, 곧 추월할 것 같아요!",
+                gap_seconds=_gi.get("gap") if _gi else None,
+                gap_trend=_gi.get("trend") if _gi else None,
+            )
         except asyncio.CancelledError:
             raise
         except Exception:
