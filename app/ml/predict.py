@@ -18,7 +18,17 @@ _RUN = "races_initial_event_type_final"
 _CONTRACT = _MODELS_DIR / f"{_RUN}_unity_contract.json"
 
 # 지연 로드 캐시 (첫 predict에서 1회 로드)
-_state: dict = {"loaded": False, "order": None, "fill": -1.0, "outputs": {}}
+_state: dict = {"loaded": False, "order": None, "fill": -1.0, "outputs": {}, "temporal": None}
+
+_TEMPORAL_MODEL = _MODELS_DIR / "suzuka_temporal_event_label_overtake.txt"
+_TEMPORAL_BASE_MODEL = _MODELS_DIR / "suzuka_temporal_event_base_label_overtake.txt"
+_TEMPORAL_ORDER = [
+    "base_probability", "gap_ahead", "gap_delta_3s", "gap_delta_5s", "gap_delta_10s",
+    "gap_min_5s", "gap_std_10s", "closing_ratio_10s", "speed_delta",
+    "speed_delta_mean_5s", "speed_delta_mean_10s", "speed_advantage_ratio_10s",
+    "drs_active", "drs_active_ratio_10s", "drs_range", "track_progress_sin",
+    "track_progress_cos", "sector", "segment",
+]
 
 
 def _basename(path_str: str) -> str:
@@ -45,6 +55,9 @@ def _load() -> None:
             "display_values": cal.get("display_values", []),
         }
     _state["outputs"] = outputs
+    if _TEMPORAL_MODEL.exists():
+        _state["temporal"] = lgb.Booster(model_file=str(_TEMPORAL_MODEL))
+        _state["temporal_base"] = lgb.Booster(model_file=str(_TEMPORAL_BASE_MODEL))
     _state["loaded"] = True
 
 
@@ -69,6 +82,17 @@ def predict(feats: dict) -> dict:
     result = {}
     for name, o in _state["outputs"].items():
         raw = float(o["booster"].predict(x)[0])
+        if name == "overtake_probability" and _state["temporal"] is not None:
+            temporal_feats = dict(feats)
+            temporal_feats["base_probability"] = float(_state["temporal_base"].predict(x)[0])
+            temporal_x = np.array(
+                [[float(temporal_feats.get(key, fill)) for key in _TEMPORAL_ORDER]],
+                dtype=float,
+            )
+            raw = float(_state["temporal"].predict(temporal_x)[0])
+            # Stable UI operating point: temporal raw 0.60 maps to the existing
+            # watcher threshold 0.30. This is model-output calibration, not an env tweak.
+            raw = _calibrate(raw, [0.0, 0.6, 1.0], [0.0, 0.3, 1.0])
         result[name] = round(_calibrate(raw, o["raw_thresholds"], o["display_values"]), 4)
     return result
 

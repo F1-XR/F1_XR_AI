@@ -29,6 +29,7 @@ logger = logging.getLogger(__name__)
 
 _MAX_GAP = 1.0        # 이 값 이하 gap(초)인 드라이버만 예측 후보(접전)
 _MAX_CANDIDATES = 8   # 데모 구간의 짧은 추월 직전 후보를 놓치지 않도록 넉넉히 본다.
+_race_start_cache: dict[int, datetime] = {}
 
 
 def _parse_iso(iso: str | None) -> datetime | None:
@@ -52,6 +53,33 @@ def _shift_iso(iso: str | None, seconds: float) -> str | None:
     if dt is None:
         return iso
     return (dt + timedelta(seconds=seconds)).isoformat()
+
+
+async def _race_has_started(session_key: int, cutoff: str | None) -> bool:
+    """True only at/after the official race Lap 1 start.
+
+    Formation/warm-up laps happen before the first recorded race lap start and
+    must never enter candidate selection or any hybrid/ML announcement path.
+    Failure is closed: if the start cannot be established, do not predict.
+    """
+    now = _parse_iso(cutoff)
+    if now is None:
+        return False
+    start = _race_start_cache.get(int(session_key))
+    if start is None:
+        laps = await openf1.get_laps(session_key)
+        starts: list[datetime] = []
+        for row in laps:
+            if row.get("lap_number") != 1:
+                continue
+            parsed = _parse_iso(row.get("date_start"))
+            if parsed is not None:
+                starts.append(parsed)
+        if not starts:
+            return False
+        start = min(starts)
+        _race_start_cache[int(session_key)] = start
+    return now >= start
 
 
 def _candidate_score(candidate: dict, future_gain: bool = False) -> float:
@@ -326,6 +354,10 @@ async def watch(
             continue
         last_evaluated_key = eval_key
 
+        if not await _race_has_started(int(session), cutoff):
+            _debug("[watcher-skip] t=%s reason=formation_or_pre_race", cutoff)
+            continue
+
         try:
             candidates_info = await _battle_candidates(session, detection_cutoff)
             # 실시간 gap 스트리밍: 매 주기 '가장 붙은' 드라이버의 현재 gap을 게이지로 내려보낸다.
@@ -354,7 +386,11 @@ async def watch(
                 ],
             )
             elapsed = _elapsed_from_session_hour(detection_cutoff)
-            confirmed_gains = await _confirmed_gain_candidates(session, cutoff, candidates_info)
+            confirmed_gains = (
+                await _confirmed_gain_candidates(session, cutoff, candidates_info)
+                if settings.watcher_replay_confirmation_enabled
+                else []
+            )
             if confirmed_gains:
                 confirmed = confirmed_gains[0]
                 dn = confirmed["driver"]
@@ -413,7 +449,8 @@ async def watch(
 
             hybrid_hits = [
                 c for c in candidates_info
-                if c["gap"] <= settings.watcher_hybrid_gap_sec
+                if settings.watcher_hybrid_enabled
+                and c["gap"] <= settings.watcher_hybrid_gap_sec
                 and c["trend"] is not None
                 and c["trend"] <= settings.watcher_hybrid_closing_delta
             ]

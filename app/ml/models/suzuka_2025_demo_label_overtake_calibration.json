@@ -1,0 +1,6 @@
+{
+  "method": "identity_after_suzuka_2024_adapter",
+  "raw_thresholds": [],
+  "display_values": [],
+  "note": "The generic isotonic curve is invalid after continued training changes the raw score scale."
+}

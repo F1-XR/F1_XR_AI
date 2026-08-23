@@ -93,7 +93,7 @@
       "target": "label_overtake",
       "model_file": "data\\models\\races_initial_event_type_final_label_overtake.txt",
       "metadata_file": "data\\models\\races_initial_event_type_final_label_overtake.json",
-      "calibration_file": "data\\models\\races_initial_event_type_final_label_overtake_calibration.json",
+      "calibration_file": "data\\models\\suzuka_2025_demo_label_overtake_calibration.json",
       "probability_for_ui": "display_probability",
       "raw_probability": "LightGBM predict_proba positive class",
       "calibration": {

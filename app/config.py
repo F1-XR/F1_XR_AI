@@ -63,13 +63,18 @@ class Settings(BaseSettings):
     watcher_threshold: float = 0.3     # 이 확률 이상이면 안내(0~1)
     watcher_period_sec: float = 0.5    # 감시 주기(초)
     watcher_cooldown_sec: float = 10.0 # 연속 안내 최소 간격(초)
-    watcher_ignore_lap1: bool = True   # 스타트/포메이션성 1랩 안내 억제
+    # 포메이션 랩은 watcher가 공식 Lap 1 시작시각으로 별도 완전 차단한다.
+    # 실제 레이스는 Lap 1부터 측정한다.
+    watcher_ignore_lap1: bool = False
     watcher_require_closing: bool = True # 앞차와 간격이 벌어지는 후보는 억제
-    watcher_hybrid_enabled: bool = True # ML 점수 + gap/closing 도메인 신호 결합
+    # 순수 ML 예측 평가에서는 아래 세 보조 경로를 끈다. 각각을 켜면 모델 threshold와
+    # 무관하게 알림이 발생할 수 있으므로 데모 연출/실험용으로만 명시적으로 활성화한다.
+    watcher_replay_confirmation_enabled: bool = False
+    watcher_hybrid_enabled: bool = False # ML 점수 + gap/closing 도메인 신호 결합
     watcher_hybrid_gap_sec: float = 0.85
     watcher_hybrid_closing_delta: float = -0.05
     watcher_hybrid_min_probability: float = 0.05
-    watcher_fast_hybrid_enabled: bool = True
+    watcher_fast_hybrid_enabled: bool = False
     watcher_fast_gap_sec: float = 0.15
     watcher_fast_closing_delta: float = -0.1
     watcher_fast_min_elapsed_sec: float = 300.0

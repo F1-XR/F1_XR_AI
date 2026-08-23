@@ -1,0 +1,205 @@
+{
+  "session": 10006,
+  "samples": [
+    {
+      "kind": "positive",
+      "driver": 55,
+      "at_time": "2025-04-06T05:06:14.788000+00:00",
+      "feature_count": 26,
+      "probability": 0.0072
+    },
+    {
+      "kind": "positive",
+      "driver": 5,
+      "at_time": "2025-04-06T05:18:08.788000+00:00",
+      "feature_count": 26,
+      "probability": 0.0285
+    },
+    {
+      "kind": "positive",
+      "driver": 14,
+      "at_time": "2025-04-06T05:37:04.788000+00:00",
+      "feature_count": 26,
+      "probability": 0.0242
+    },
+    {
+      "kind": "positive",
+      "driver": 81,
+      "at_time": "2025-04-06T05:37:52.788000+00:00",
+      "feature_count": 26,
+      "probability": 0.0528
+    },
+    {
+      "kind": "positive",
+      "driver": 16,
+      "at_time": "2025-04-06T05:40:04.788000+00:00",
+      "feature_count": 26,
+      "probability": 0.0726
+    },
+    {
+      "kind": "positive",
+      "driver": 55,
+      "at_time": "2025-04-06T05:43:32.788000+00:00",
+      "feature_count": 26,
+      "probability": 0.0072
+    },
+    {
+      "kind": "positive",
+      "driver": 6,
+      "at_time": "2025-04-06T05:49:44.788000+00:00",
+      "feature_count": 26,
+      "probability": 0.2226
+    },
+    {
+      "kind": "positive",
+      "driver": 23,
+      "at_time": "2025-04-06T05:50:58.788000+00:00",
+      "feature_count": 26,
+      "probability": 0.0521
+    },
+    {
+      "kind": "positive",
+      "driver": 87,
+      "at_time": "2025-04-06T05:52:16.788000+00:00",
+      "feature_count": 26,
+      "probability": 0.105
+    },
+    {
+      "kind": "positive",
+      "driver": 10,
+      "at_time": "2025-04-06T05:54:40.788000+00:00",
+      "feature_count": 26,
+      "probability": 0.0072
+    },
+    {
+      "kind": "positive",
+      "driver": 87,
+      "at_time": "2025-04-06T05:55:53.788000+00:00",
+      "feature_count": 26,
+      "probability": 0.0528
+    },
+    {
+      "kind": "positive",
+      "driver": 55,
+      "at_time": "2025-04-06T06:17:54.788000+00:00",
+      "feature_count": 26,
+      "probability": 0.1591
+    },
+    {
+      "kind": "negative",
+      "driver": 16,
+      "at_time": "2025-04-06T05:05:25.788000+00:00",
+      "feature_count": 26,
+      "probability": 0.0041
+    },
+    {
+      "kind": "negative",
+      "driver": 22,
+      "at_time": "2025-04-06T05:07:15.788000+00:00",
+      "feature_count": 26,
+      "probability": 0.0063
+    },
+    {
+      "kind": "negative",
+      "driver": 81,
+      "at_time": "2025-04-06T05:09:32.788000+00:00",
+      "feature_count": 26,
+      "probability": 0.0028
+    },
+    {
+      "kind": "negative",
+      "driver": 6,
+      "at_time": "2025-04-06T05:11:55.788000+00:00",
+      "feature_count": 26,
+      "probability": 0.0521
+    },
+    {
+      "kind": "negative",
+      "driver": 18,
+      "at_time": "2025-04-06T05:14:30.788000+00:00",
+      "feature_count": 26,
+      "probability": 0.0041
+    },
+    {
+      "kind": "negative",
+      "driver": 55,
+      "at_time": "2025-04-06T05:18:19.788000+00:00",
+      "feature_count": 26,
+      "probability": 0.0143
+    },
+    {
+      "kind": "negative",
+      "driver": 5,
+      "at_time": "2025-04-06T05:27:31.788000+00:00",
+      "feature_count": 26,
+      "probability": 0.0035
+    },
+    {
+      "kind": "negative",
+      "driver": 87,
+      "at_time": "2025-04-06T05:38:40.788000+00:00",
+      "feature_count": 26,
+      "probability": 0.0059
+    },
+    {
+      "kind": "negative",
+      "driver": 6,
+      "at_time": "2025-04-06T05:48:53.788000+00:00",
+      "feature_count": 26,
+      "probability": 0.0143
+    },
+    {
+      "kind": "negative",
+      "driver": 27,
+      "at_time": "2025-04-06T06:03:10.788000+00:00",
+      "feature_count": 26,
+      "probability": 0.0043
+    },
+    {
+      "kind": "negative",
+      "driver": 27,
+      "at_time": "2025-04-06T06:14:11.788000+00:00",
+      "feature_count": 26,
+      "probability": 0.0035
+    },
+    {
+      "kind": "negative",
+      "driver": 55,
+      "at_time": "2025-04-06T06:21:08.788000+00:00",
+      "feature_count": 26,
+      "probability": 0.6184
+    }
+  ],
+  "thresholds": {
+    "0.1": {
+      "event_recall": 0.25,
+      "negative_fire_rate": 0.08333333333333333
+    },
+    "0.15": {
+      "event_recall": 0.16666666666666666,
+      "negative_fire_rate": 0.08333333333333333
+    },
+    "0.2": {
+      "event_recall": 0.08333333333333333,
+      "negative_fire_rate": 0.08333333333333333
+    },
+    "0.25": {
+      "event_recall": 0.0,
+      "negative_fire_rate": 0.08333333333333333
+    },
+    "0.3": {
+      "event_recall": 0.0,
+      "negative_fire_rate": 0.08333333333333333
+    },
+    "0.4": {
+      "event_recall": 0.0,
+      "negative_fire_rate": 0.08333333333333333
+    },
+    "0.5": {
+      "event_recall": 0.0,
+      "negative_fire_rate": 0.08333333333333333
+    }
+  },
+  "positive_mean": 0.06594166666666666,
+  "negative_mean": 0.061133333333333324
+}

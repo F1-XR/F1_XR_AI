@@ -98,6 +98,8 @@ async def test_race_status_safety_car(monkeypatch):
 # ───────────────────────── explain_why ─────────────────────────
 
 async def test_explain_why_structure(monkeypatch):
+    monkeypatch.setattr(openf1, "get_driver",
+                        _aret({"full_name": "Lewis Hamilton", "team_name": "Mercedes"}))
     monkeypatch.setattr(openf1, "get_pit",
                         _aret([{"date": "a", "lap_number": 1}, {"date": "b", "lap_number": 20}]))
     monkeypatch.setattr(openf1, "get_stints",
@@ -115,6 +117,8 @@ async def test_explain_why_structure(monkeypatch):
 
 async def test_explain_why_no_spoiler(monkeypatch):
     """at_time(현재 시각) 이후의 피트·타이어·갭은 감춰야 한다(스포일러 방지)."""
+    monkeypatch.setattr(openf1, "get_driver",
+                        _aret({"full_name": "Lewis Hamilton", "team_name": "Mercedes"}))
     # 현재 시각을 "m"으로 두면 "a"는 과거, "z"는 미래.
     monkeypatch.setattr(openf1, "get_pit",
                         _aret([{"date": "a", "lap_number": 5}, {"date": "z", "lap_number": 40}]))

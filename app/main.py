@@ -231,7 +231,7 @@ async def ws(websocket: WebSocket):
             "type": "command", "name": "predictOvertake",
             "args": {
                 "driver_number": driver_number,
-                "probability": round(max(probability, 0.85), 4),
+                "probability": round(max(0.0, min(probability, 1.0)), 4),
                 "risk_label": "Overtake Risk High",
                 "gap_seconds": round(gap_seconds, 3) if gap_seconds is not None else None,
                 "gap_trend": round(gap_trend, 4) if gap_trend is not None else None,

@@ -76,6 +76,24 @@ async def get_drivers(session_key: int) -> list[dict]:
     return await _get_resource(session_key, "drivers")
 
 
+async def get_session_metadata(session_key: int) -> dict:
+    """Session + meeting metadata used by the runtime feature contract."""
+    base = _server_base()
+    if base:
+        url = f"{base}/f1/{session_key}/metadata"
+        params = None
+    else:
+        url = f"{settings.openf1_base}/sessions"
+        params = {"session_key": session_key}
+    async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
+        response = await client.get(url, params=params)
+        response.raise_for_status()
+        data = response.json()
+    if isinstance(data, list):
+        return data[0] if data else {}
+    return data
+
+
 async def get_race_control(session_key: int) -> list[dict]:
     """깃발·세이프티카·인시던트 등 경기 상황 이벤트 원본."""
     return await _get_resource(session_key, "race_control")
