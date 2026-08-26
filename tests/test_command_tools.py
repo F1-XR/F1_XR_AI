@@ -94,6 +94,24 @@ async def test_show_battle_context_uses_relative_speed_fusion(monkeypatch):
     assert cmds[0]["args"]["drs"] is True
 
 
+async def test_show_battle_context_keeps_missing_gap_as_null(monkeypatch):
+    set_context(9523, "2024-05-26T13:20:08+00:00")
+    monkeypatch.setattr(openf1, "get_positions", _aret([
+        {"date": "2024-05-26T13:20:08+00:00", "driver_number": 16, "position": 3},
+        {"date": "2024-05-26T13:20:08+00:00", "driver_number": 44, "position": 4},
+    ]))
+    monkeypatch.setattr(openf1, "get_intervals", _aret([]))
+    monkeypatch.setattr(openf1, "get_car_data_window", _aret([]))
+
+    start_capture()
+    out = await show_battle_context.ainvoke({"driver_number": 44})
+    command = drain()[0]
+
+    assert out["gap_available"] is False
+    assert command["args"]["gap_available"] is False
+    assert command["args"]["gap_seconds"] is None
+
+
 async def test_recommend_battle_action_press_attack(monkeypatch):
     set_context(9523, "2024-05-26T13:20:08+00:00")
     monkeypatch.setattr(openf1, "get_positions", _aret([

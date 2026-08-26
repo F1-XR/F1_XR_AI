@@ -15,6 +15,7 @@ from __future__ import annotations
 import ast
 import json
 import logging
+import re
 
 from langchain_openai import ChatOpenAI
 from langgraph.prebuilt import create_react_agent
@@ -24,7 +25,14 @@ from ..config import settings
 from .commands import drain, emit_command, start_capture
 from .context import current_selected, current_session, current_time, set_context
 from .planner import build_command_plan, execute_command_plan, normalize_command_order
-from .tools import ALL_TOOLS, get_driver_info, jump_to_event, show_battle_context
+from .tools import (
+    ALL_TOOLS,
+    get_driver_info,
+    get_recent_overtake_context,
+    jump_to_event,
+    predict_overtake,
+    show_battle_context,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -249,10 +257,134 @@ def _why_sentence(d: dict) -> str | None:
     if pits:
         compound = stints[-1].get("compound") if stints else None
         tail = f" 지금은 {compound} 타이어를 쓰고 있어요." if compound else ""
-        return f"{name} 선수는 타이어 교체를 위해 피트인했어요.{tail}"
+        return (f"{name} 선수의 최근 피트 기록과 타이어 교체는 확인돼요.{tail} "
+                "다만 이 데이터만으로 피트 결정의 원인을 단정할 수는 없어요.")
     if gap.get("interval") is not None:
         return f"{name} 선수는 앞차와 {gap['interval']}초 차이예요."
     return None
+
+
+def _recent_overtake_sentence(d: dict) -> str:
+    """최근 추월을 확인된 사실 → 근거 있는 해석 → 한계 순으로 설명한다."""
+    subject = d.get("subject_name") or f"{d.get('subject_driver')}번 선수"
+    target = d.get("target_name") or f"{d.get('target_driver')}번 선수"
+    gap_start, gap_end = d.get("gap_start_sec"), d.get("gap_end_sec")
+
+    facts = []
+    if gap_start is not None and gap_end is not None and gap_end < gap_start:
+        facts.append(f"간격을 {gap_start}초에서 {gap_end}초까지 좁혔고")
+    elif gap_end is not None:
+        facts.append(f"추월 직전 {gap_end}초까지 붙었고")
+
+    speed = d.get("speed_comparison") or {}
+    mean_delta = speed.get("mean_advantage_kmh")
+    peak, target_peak = speed.get("subject_peak_speed_kmh"), speed.get("target_speed_at_peak_kmh")
+    if mean_delta is not None and mean_delta > 1:
+        facts.append(f"접근 구간 평균 상대속도가 약 {mean_delta}km/h 높았고")
+    if d.get("drs_active") is True:
+        facts.append("DRS도 활성화했습니다")
+
+    track = d.get("track") or {}
+    if facts:
+        first = f"{subject} 선수는 {target} 선수와의 " + " ".join(facts) + "."
+    else:
+        first = f"{subject} 선수가 {target} 선수를 추월한 것은 확인했지만 직접 원인은 단정하기 어렵습니다."
+
+    contributors = []
+    if d.get("drs_active") is True:
+        contributors.append("DRS")
+    if mean_delta is not None and mean_delta > 1:
+        contributors.append("실측 상대속도 우위")
+    if gap_start is not None and gap_end is not None and gap_end < gap_start:
+        contributors.append("지속적인 간격 감소")
+    location = f" 순위 교환 지점은 {track['zone']}이었습니다." if track.get("zone") else ""
+    interpretation = (f"{location} 데이터상 주요 기여 요인은 {'·'.join(contributors)}로 볼 수 있습니다."
+                      if contributors else "현재 데이터만으로 주요 기여 요인을 특정하기 어렵습니다.")
+
+    subj_tyre, target_tyre = d.get("subject_tyre") or {}, d.get("target_tyre") or {}
+    sa, ta = subj_tyre.get("age_laps"), target_tyre.get("age_laps")
+    if sa is not None and ta is not None and abs(sa - ta) <= 1:
+        tyre_sentence = "두 선수의 타이어 사용 기간은 비슷해 타이어 우위를 핵심 원인으로 단정할 근거는 없습니다."
+    elif sa is not None and ta is not None and sa + 2 <= ta:
+        tyre_sentence = f"{subject} 선수의 타이어가 약 {ta - sa}랩 더 신선해 보조적으로 유리했을 가능성은 있습니다."
+    else:
+        tyre_sentence = "타이어 데이터만으로 우위를 단정하지는 않았습니다."
+
+    pace = d.get("recent_pace") or {}
+    pace_adv = pace.get("subject_advantage_sec")
+    pace_sentence = ""
+    if pace_adv is not None and pace_adv > 0.3:
+        pace_sentence = f" 직전 완주 랩 평균도 {subject} 선수가 약 {pace_adv}초 빨랐습니다."
+    elif pace_adv is not None and pace_adv < -0.3:
+        pace_sentence = f" 직전 완주 랩 평균은 오히려 {target} 선수가 약 {abs(pace_adv)}초 빨랐습니다."
+
+    limitation = "방어 동작·레이싱 라인·운전자 실수나 의도는 이 데이터만으로 확인할 수 없습니다."
+    if d.get("race_control_clear") is False:
+        limitation = "당시 레이스 컨트롤 이벤트가 있어 일반적인 온트랙 추월 원인으로 단정하지 않았습니다."
+    return f"{first} {interpretation} {tyre_sentence}{pace_sentence} {limitation}"
+
+
+_DRIVER_ALIASES = {
+    "베르스타펜": 1, "막스": 1, "노리스": 4, "하자르": 6, "두한": 7,
+    "가슬리": 10, "안토넬리": 12, "알론소": 14, "르클레르": 16,
+    "스트롤": 18, "츠노다": 22, "알본": 23, "훌켄베르크": 27,
+    "로슨": 30, "오콘": 31, "해밀턴": 44, "루이스": 44,
+    "사인츠": 55, "러셀": 63, "피아스트리": 81, "베어만": 87,
+    "보르톨레토": 5,
+}
+
+_DRIVER_KO_NAMES = {
+    1: "막스 베르스타펜", 4: "랜도 노리스", 5: "가브리에우 보르톨레토",
+    6: "아이작 하자르", 7: "잭 두한", 10: "피에르 가슬리",
+    12: "키미 안토넬리", 14: "페르난도 알론소", 16: "샤를 르클레르",
+    18: "랜스 스트롤", 22: "유키 츠노다", 23: "알렉스 알본",
+    27: "니코 훌켄베르크", 30: "리암 로슨", 31: "에스테반 오콘",
+    44: "루이스 해밀턴", 55: "카를로스 사인츠", 63: "조지 러셀",
+    81: "오스카 피아스트리", 87: "올리버 베어만",
+}
+
+
+def _driver_hint_from_text(text: str) -> int | None:
+    """데모 질문의 한국어 선수명을 차량 번호로 안전하게 정규화한다."""
+    compact = text.replace(" ", "").lower()
+    numbered = re.search(r"(\d{1,2})번", compact)
+    if numbered:
+        return int(numbered.group(1))
+    for alias, number in _DRIVER_ALIASES.items():
+        if alias in compact:
+            return number
+    return None
+
+
+def _overtake_probability_sentence(d: dict) -> str:
+    """모델 출력값을 바꾸거나 임의 평가하지 않는 확률 답변."""
+    number = d.get("driver_number")
+    name = _DRIVER_KO_NAMES.get(number) or d.get("driver_name") or f"{number}번 선수"
+    probability = d.get("overtake_probability")
+    if probability is None:
+        return f"{name}의 추월 확률을 계산할 수 없습니다."
+    pct = round(float(probability) * 100)
+    if pct >= 60:
+        level = "모델이 추월 가능성을 높게 보는 구간입니다."
+    elif pct >= 25:
+        level = "추월 가능성이 뚜렷하게 감지된 구간입니다."
+    else:
+        level = "아직 강한 추월 신호는 아닙니다."
+    inputs = d.get("inputs") or {}
+    details = []
+    gap = inputs.get("gap_ahead")
+    speed_delta = inputs.get("speed_delta")
+    if gap is not None:
+        details.append(f"앞차와 {round(float(gap), 2)}초 차이")
+    if speed_delta is not None and float(speed_delta) > 1:
+        details.append(f"상대속도 약 {round(float(speed_delta), 1)}km/h 우위")
+    evidence = f" 현재 {'이고, '.join(details)}로, " if details else " "
+    level_short = {
+        "모델이 추월 가능성을 높게 보는 구간입니다.": "추월 가능성이 높은 구간입니다.",
+        "추월 가능성이 뚜렷하게 감지된 구간입니다.": "추월 신호가 감지된 구간입니다.",
+        "아직 강한 추월 신호는 아닙니다.": "아직 강한 추월 신호는 아닙니다.",
+    }[level]
+    return f"{name}의 30초 내 추월 확률은 {pct}%입니다.{evidence}{level_short}"
 
 
 def _salvage_from_tools(messages: list, text: str = "") -> str | None:
@@ -327,7 +459,35 @@ async def _rule_based_demo_route(text: str) -> tuple[str, list[dict], bool] | No
     얇은 안전장치다. 데이터 조회가 필요한 지목/배틀/추월 장면은 기존 도구를 그대로 호출한다.
     """
     t = text.replace(" ", "")
-    selected = current_selected()
+    # 질문에 명시한 선수/번호가 화면의 이전 선택보다 항상 우선한다.
+    selected = _driver_hint_from_text(text) or current_selected()
+
+    # 확률 질문은 실제 툴 숫자를 결정적 문장으로 읽는다. LLM이 다른 차량에도
+    # 같은 수치를 반복하거나 33%를 자의적으로 "어렵다"고 평가하지 못하게 한다.
+    if selected and "추월" in t and any(k in t for k in ("확률", "가능성", "할것", "할까", "곧")):
+        start_capture()
+        data = await predict_overtake.ainvoke({"driver_number": selected})
+        if isinstance(data, dict) and data.get("available") is not False:
+            return _overtake_probability_sentence(data), drain(), True
+        note = data.get("note") if isinstance(data, dict) else None
+        return note or "추월 확률을 계산하지 못했어요.", drain(), False
+
+    # 방금 추월 원인: LLM 자유 생성 전에 최근 순위 swap을 찾아 gap·DRS·양쪽 타이어로만 답한다.
+    # "어떻게 추월했어?"처럼 근거 항목을 사용자가 직접 말하지 않아도 자동 적용한다.
+    if selected and "추월" in t and any(k in t for k in ("왜", "어떻게", "이유", "성공")):
+        start_capture()
+        data = await get_recent_overtake_context(selected)
+        if data.get("available"):
+            return _recent_overtake_sentence(data), drain(), True
+        return data.get("note") or "최근 추월 근거를 확인하지 못했어요.", drain(), False
+
+    # 그 밖의 원인 질문도 LLM이 제한된 상관관계를 원인으로 바꾸지 못하게 한다.
+    # 확인된 기록만 말하고, 전략적 이유는 데이터 부족으로 명시한다.
+    if selected and "왜" in t:
+        start_capture()
+        data = await explain_why.ainvoke({"driver_number": selected})
+        reply = _why_sentence(data) if isinstance(data, dict) else None
+        return reply or "현재 데이터만으로는 그 원인을 단정하기 어려워요.", drain(), bool(reply)
 
     # 지목 grounding: "이 선수/이 차/쟤 누구야?"
     if selected and any(k in t for k in ("이선수누구", "이차누구", "쟤누구", "얘누구")):

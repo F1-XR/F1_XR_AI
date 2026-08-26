@@ -16,6 +16,7 @@
 """
 from __future__ import annotations
 
+import asyncio
 import datetime as _dt
 import math
 
@@ -56,6 +57,13 @@ def _iso_minus(iso: str, seconds: float) -> str | None:
         return None
 
 
+def _closing_ratio(gaps: list[float]) -> float:
+    return sum(
+        current < previous
+        for previous, current in zip(gaps, gaps[1:])
+    ) / max(1, len(gaps) - 1)
+
+
 def _current_lap(laps: list[dict], cutoff: str | None) -> tuple[int | None, dict | None]:
     valid = [
         r for r in _before(laps, cutoff, key="date_start")
@@ -88,12 +96,24 @@ async def build_features(session_key: int, at_time: str | None, driver_number: i
     cutoff = at_time
     feats: dict[str, float] = {}
 
+    # 서로 독립적인 세션 조회를 순차로 기다리면 원격 API 왕복시간이 그대로 합산된다.
+    # 한 시점에 필요한 기본 자료를 병렬로 가져와 음성 질의의 첫 응답 지연을 줄인다.
+    (interval_rows, position_rows, metadata, subject_laps,
+     subject_stints, weather_rows) = await asyncio.gather(
+        openf1.get_intervals(session_key, driver_number),
+        openf1.get_positions(session_key),
+        openf1.get_session_metadata(session_key),
+        openf1.get_laps(session_key, driver_number),
+        openf1.get_stints(session_key, driver_number),
+        openf1.get_weather(session_key),
+    )
+
     # season — at_time 연도
     if cutoff and len(cutoff) >= 4 and cutoff[:4].isdigit():
         feats["season"] = float(cutoff[:4])
 
     # intervals → current gap plus short temporal approach pattern
-    iv = _before(await openf1.get_intervals(session_key, driver_number), cutoff)
+    iv = _before(interval_rows, cutoff)
     iv.sort(key=lambda r: r["date"])
     if iv:
         g_now = _num(iv[-1].get("interval"))   # 앞차와의 간격(초)
@@ -131,15 +151,14 @@ async def build_features(session_key: int, at_time: str | None, driver_number: i
                 feats["gap_std_10s"] = math.sqrt(
                     sum((gap - mean_gap) ** 2 for gap in gaps_10) / (len(gaps_10) - 1)
                 )
-                chronological = list(reversed(gaps_10))
-                feats["closing_ratio_10s"] = sum(
-                    now_gap < prev_gap
-                    for prev_gap, now_gap in zip(chronological, chronological[1:])
-                ) / max(1, len(chronological) - 1)
+                # iv/recent_gaps는 이미 오래된 값 → 최신 값 순서다. 뒤집으면
+                # closing(갭 감소)을 opening으로 계산하는 학습-런타임 불일치가 생긴다.
+                chronological = gaps_10
+                feats["closing_ratio_10s"] = _closing_ratio(chronological)
 
     # position → position
     pos = [
-        r for r in _before(await openf1.get_positions(session_key), cutoff)
+        r for r in _before(position_rows, cutoff)
         if r.get("driver_number") == driver_number and r.get("position") is not None
     ]
     pos.sort(key=lambda r: r["date"])
@@ -148,7 +167,7 @@ async def build_features(session_key: int, at_time: str | None, driver_number: i
         feats["position"] = float(pos[-1]["position"])
 
     # 같은 시각 각 차량의 최신 순위로 바로 앞차를 찾는다.
-    all_positions = _before(await openf1.get_positions(session_key), cutoff)
+    all_positions = _before(position_rows, cutoff)
     latest_by_driver: dict[int, dict] = {}
     for row in all_positions:
         dn, date, position = row.get("driver_number"), row.get("date"), row.get("position")
@@ -167,7 +186,6 @@ async def build_features(session_key: int, at_time: str | None, driver_number: i
                 break
 
     # 세션 메타데이터: 학습과 같은 circuit_key/type 인코딩을 사용한다.
-    metadata = await openf1.get_session_metadata(session_key)
     if metadata.get("circuit_key") is not None:
         feats["circuit_key"] = float(metadata["circuit_key"])
     circuit_type = str(metadata.get("circuit_type", "")).strip().lower()
@@ -183,7 +201,6 @@ async def build_features(session_key: int, at_time: str | None, driver_number: i
     feats["restart_phase"] = 0.0
 
     # laps → current_lap, is_lap1, sector
-    subject_laps = await openf1.get_laps(session_key, driver_number)
     current_lap, cur_lap_rec = _current_lap(subject_laps, cutoff)
     if current_lap is not None:
         feats["is_lap1"] = 1.0 if current_lap == 1 else 0.0
@@ -202,21 +219,24 @@ async def build_features(session_key: int, at_time: str | None, driver_number: i
                 feats["sector"] = 3.0
 
         # stints → tyre_age (현재 타이어의 사용 랩 수)
-        subject_stints = await openf1.get_stints(session_key, driver_number)
         age = _tyre_age(subject_stints, current_lap)
         if age is not None:
             feats["tyre_age"] = age
 
         if ahead_driver is not None:
-            ahead_lap, _ = _current_lap(await openf1.get_laps(session_key, ahead_driver), cutoff)
+            ahead_laps, ahead_stints = await asyncio.gather(
+                openf1.get_laps(session_key, ahead_driver),
+                openf1.get_stints(session_key, ahead_driver),
+            )
+            ahead_lap, _ = _current_lap(ahead_laps, cutoff)
             if ahead_lap is not None:
                 feats["same_lap"] = 1.0 if ahead_lap == current_lap else 0.0
-                ahead_age = _tyre_age(await openf1.get_stints(session_key, ahead_driver), ahead_lap)
+                ahead_age = _tyre_age(ahead_stints, ahead_lap)
                 if age is not None and ahead_age is not None:
                     feats["tyre_age_delta"] = age - ahead_age
 
     # weather → air_temperature, track_temperature, humidity, rainfall (최신 ≤ cutoff)
-    weather = _before(await openf1.get_weather(session_key), cutoff)
+    weather = _before(weather_rows, cutoff)
     weather.sort(key=lambda r: r["date"])
     if weather:
         w = weather[-1]
@@ -241,8 +261,12 @@ async def build_features(session_key: int, at_time: str | None, driver_number: i
     # car_data(시점 근처 창) → current and 5-10 second relative-speed pattern.
     start_iso = _iso_minus(cutoff, 11.0) if cutoff else None
     if start_iso:
-        car = [c for c in await openf1.get_car_data_window(session_key, driver_number, start_iso, cutoff)
-               if c.get("date")]
+        car_rows, ahead_car_rows = await asyncio.gather(
+            openf1.get_car_data_window(session_key, driver_number, start_iso, cutoff),
+            (openf1.get_car_data_window(session_key, ahead_driver, start_iso, cutoff)
+             if ahead_driver is not None else asyncio.sleep(0, result=[])),
+        )
+        car = [c for c in car_rows if c.get("date")]
         car.sort(key=lambda c: c["date"])
         if car:
             now = car[-1]
@@ -252,10 +276,8 @@ async def build_features(session_key: int, at_time: str | None, driver_number: i
                 feats["drs_active"] = 1.0 if now.get("drs") in (10, 12, 14) else 0.0
                 # 학습과 동일: speed_delta = 내 속도 - 바로 앞차 속도.
                 if ahead_driver is not None:
-                    ahead_car = await openf1.get_car_data_window(
-                        session_key, ahead_driver, start_iso, cutoff
-                    )
-                    ahead_car = [c for c in ahead_car if c.get("date") and _num(c.get("speed")) is not None]
+                    ahead_car = [c for c in ahead_car_rows
+                                 if c.get("date") and _num(c.get("speed")) is not None]
                     if ahead_car:
                         closest = min(ahead_car, key=lambda c: _seconds_between(c["date"], now["date"]))
                         feats["speed_delta"] = sp - float(closest["speed"])
@@ -285,10 +307,13 @@ async def build_features(session_key: int, at_time: str | None, driver_number: i
     # track_progress(위치 기하) → 현재 좌표를 경기 트랙 기준선에 투영
     # 기준선은 경기당 1회 캐시(사실), 진행률은 좌표 1개 투영(가벼움). 추월 확률은 별개(실시간).
     if cutoff:
-        ref = await track_ref.get_reference(session_key)
+        loc_start = _iso_minus(cutoff, 2.0)
+        ref, location_rows = await asyncio.gather(
+            track_ref.get_reference(session_key),
+            openf1.get_location_window(session_key, driver_number, loc_start, cutoff),
+        )
         if ref is not None:
-            loc_start = _iso_minus(cutoff, 2.0)
-            locs = [p for p in await openf1.get_location_window(session_key, driver_number, loc_start, cutoff)
+            locs = [p for p in location_rows
                     if p.get("x") is not None and p.get("y") is not None and p.get("date")]
             if locs:
                 locs.sort(key=lambda p: p["date"])

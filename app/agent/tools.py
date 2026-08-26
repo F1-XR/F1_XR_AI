@@ -19,7 +19,8 @@ from langchain_core.tools import tool
 
 from ..data import openf1
 from .commands import emit_command
-from .context import current_recent_overtake, current_selected, current_session, current_time, get_driver_prob, set_session
+from .context import (current_recent_overtake, current_selected, current_session, current_time,
+                      get_driver_prob, get_driver_prob_snapshot, set_session)
 
 logger = logging.getLogger(__name__)
 
@@ -237,9 +238,12 @@ async def jump_to_event(event_type: str) -> str:
     cutoff = current_time()
     target_time = None
 
+    def _visible(rows: list[dict]) -> list[dict]:
+        rows = [r for r in rows if r.get("date")]
+        return [r for r in rows if not cutoff or r["date"] <= cutoff]
+
     if event_type == "first_pit":
-        pit = await openf1.get_pit(session)
-        pit = [p for p in pit if p.get("date")]
+        pit = _visible(await openf1.get_pit(session))
         if pit:
             target_time = min(pit, key=lambda p: p["date"])["date"]
     elif event_type in ("first_overtake", "first_overtake_before"):
@@ -247,23 +251,41 @@ async def jump_to_event(event_type: str) -> str:
         if event_type == "first_overtake_before" and recent and recent.get("event_time"):
             target_time = recent["event_time"]
         else:
-            positions = [
+            positions = _visible([
                 p for p in await openf1.get_positions(session)
                 if p.get("date") and p.get("driver_number") is not None and p.get("position") is not None
-            ]
-            if cutoff:
-                positions = [p for p in positions if p["date"] <= cutoff]
+            ])
             positions.sort(key=lambda p: p["date"])
-            prev_pos: dict[int, int] = {}
+            pits = _visible(await openf1.get_pit(session))
+            prev_pos: dict[int, tuple[int, str]] = {}
             for p in positions:
                 dn, pos = int(p["driver_number"]), int(p["position"])
                 before = prev_pos.get(dn)
-                if before is not None and pos < before:
-                    target_time = p["date"]
-                    break
-                prev_pos[dn] = pos
+                if before is not None and pos < before[0]:
+                    # A real on-track pass should have a counterpart dropping into
+                    # the subject's old place at nearly the same timestamp.  This
+                    # rejects most pit-cycle/retirement position gains.
+                    counterpart = next((
+                        other for other, state in prev_pos.items()
+                        if other != dn and state[0] == pos
+                        and any(q.get("driver_number") == other
+                                and int(q.get("position")) == before[0]
+                                and abs((datetime.fromisoformat(q["date"].replace("Z", "+00:00")) -
+                                         datetime.fromisoformat(p["date"].replace("Z", "+00:00"))).total_seconds()) <= 3
+                                for q in positions)
+                    ), None)
+                    event_dt = datetime.fromisoformat(p["date"].replace("Z", "+00:00"))
+                    pit_nearby = any(
+                        pit.get("driver_number") in (dn, counterpart)
+                        and abs((datetime.fromisoformat(pit["date"].replace("Z", "+00:00")) - event_dt).total_seconds()) <= 30
+                        for pit in pits
+                    )
+                    if counterpart is not None and not pit_nearby:
+                        target_time = p["date"]
+                        break
+                prev_pos[dn] = (pos, p["date"])
     else:
-        rc = await openf1.get_race_control(session)
+        rc = _visible(await openf1.get_race_control(session))
         want = {"safety_car": "SafetyCar", "yellow_flag": "Flag"}.get(event_type)
         for ev in rc:
             if want and ev.get("category") == want and ev.get("date"):
@@ -300,7 +322,32 @@ async def predict_overtake(driver_number: int) -> dict:
     현재 리플레이 시각(at_time) 이하 데이터만 보므로 스포일러하지 않는다."""
     session = current_session()
     cutoff = current_time()
-    driver = await openf1.get_driver(session, driver_number)   # 이름 근거(할루시네이션 방지)
+    # get_drivers는 세션 캐시를 공유하므로 매 음성 질문마다 선수 단건 HTTP를 추가하지 않는다.
+    drivers = await openf1.get_drivers(session)
+    driver = next((row for row in drivers
+                   if row.get("driver_number") is not None
+                   and int(row["driver_number"]) == int(driver_number)), None)
+    cached = get_driver_prob_snapshot(session, driver_number, max_age_sec=20.0)
+    if cached and cutoff and cached.get("at_time"):
+        try:
+            now_dt = datetime.fromisoformat(cutoff.replace("Z", "+00:00"))
+            cached_dt = datetime.fromisoformat(cached["at_time"].replace("Z", "+00:00"))
+            replay_age = abs((now_dt - cached_dt).total_seconds())
+        except (ValueError, TypeError):
+            replay_age = 999.0
+        if replay_age <= 3.0:
+            return {
+                "driver_number": driver_number,
+                "driver_name": (driver or {}).get("full_name"),
+                "team": (driver or {}).get("team_name"),
+                "overtake_probability": cached["probability"],
+                "position_gain_probability": None,
+                "position_loss_probability": None,
+                "at_time": cached["at_time"],
+                "inputs": {},
+                "source": "watcher_cache",
+                "note": "현재 화면과 3초 이내인 watcher ML 계산값을 재사용했습니다.",
+            }
     try:
         from ..ml import features as _feat
         from ..ml import predict as _pred
@@ -318,6 +365,13 @@ async def predict_overtake(driver_number: int) -> dict:
         "position_gain_probability": probs.get("position_gain_probability"),
         "position_loss_probability": probs.get("position_loss_probability"),
         "at_time": cutoff,
+        "inputs": {
+            "gap_ahead": feats.get("gap_ahead"),
+            "gap_trend": feats.get("gap_trend"),
+            "speed_delta": feats.get("speed_delta"),
+            "drs_active": feats.get("drs_active"),
+            "feature_count": len(feats),
+        },
         "note": "30초 내 확률(예측치). driver_name 을 그대로 쓰고 이름을 지어내지 마세요.",
     }
 
@@ -468,7 +522,8 @@ async def show_battle_context(driver_number: int) -> dict:
         "showBattleContext",
         subject_driver=driver_number,
         target_driver=target,
-        gap_seconds=round(gap, 2) if gap is not None else 0.0,
+        gap_seconds=round(gap, 2) if gap is not None else None,
+        gap_available=gap is not None,
         predicted_gap_seconds=predicted_gap,      # 3초 뒤 예측 갭(없으면 None → Unity 화살표 생략)
         predicted_gap_std_seconds=predicted_gap_std,   # 예측 불확실성(±초). Unity가 밴드/투명도로 사용 가능
         predict_horizon_sec=horizon,
@@ -485,6 +540,7 @@ async def show_battle_context(driver_number: int) -> dict:
         "subject_driver": driver_number,
         "target_driver": target,
         "gap_seconds": round(gap, 2) if gap is not None else None,
+        "gap_available": gap is not None,
         "trend": trend,
         "drs": bool(drs),
         "predicted_gap_seconds": predicted_gap,
@@ -724,6 +780,298 @@ async def explain_situation(driver_number: int | None = None) -> dict:
                  "코너링·드라이버 실수는 단정하지 마세요. overtake_probability가 없으면(먼 차) 확률은 "
                  "언급하지 말고 갭·타이어·DRS로만 설명하세요. 사용자가 '더 자세히/왜'라고 하면 "
                  "한 단계 더 깊이 설명하세요."),
+    }
+
+
+async def get_recent_overtake_context(driver_number: int, lookback_sec: float = 20.0) -> dict:
+    """방금 끝난 추월을 설명할 검증 가능한 근거를 모은다.
+
+    추월 직후에는 ``explain_situation``이 이미 새 앞차를 대상으로 잡기 때문에 방금
+    추월당한 차를 잃는다. 최근 position swap을 먼저 찾아 사건 직전 시각으로 되돌린 뒤
+    gap·DRS·두 차량 타이어만 반환한다. LLM 자유 생성이 아닌 데모용 결정적 답변에 쓴다.
+    """
+    import asyncio
+    from datetime import datetime, timedelta, timezone
+
+    session = current_session()
+    cutoff = current_time()
+
+    def _dt(value):
+        if not value:
+            return None
+        try:
+            parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+            return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+        except (TypeError, ValueError):
+            return None
+
+    end = _dt(cutoff)
+    if session is None or end is None:
+        return {"available": False, "note": "현재 경기 시각을 확인할 수 없어요."}
+
+    positions, drivers, pits = await asyncio.gather(
+        openf1.get_positions(session), openf1.get_drivers(session), openf1.get_pit(session)
+    )
+    start = end - timedelta(seconds=lookback_sec)
+    by_driver: dict[int, list[tuple[datetime, int]]] = {}
+    for row in positions or []:
+        dn, pos, when = row.get("driver_number"), row.get("position"), _dt(row.get("date"))
+        if dn is None or pos is None or when is None or when > end:
+            continue
+        by_driver.setdefault(int(dn), []).append((when, int(pos)))
+    for rows in by_driver.values():
+        rows.sort(key=lambda item: item[0])
+
+    subject_rows = by_driver.get(int(driver_number), [])
+    event = None
+    previous = None
+    for when, pos in subject_rows:
+        if when < start:
+            previous = (when, pos)
+            continue
+        if previous is not None and pos < previous[1]:
+            event = {"time": when, "before": previous[1], "after": pos}
+        previous = (when, pos)
+    if event is None:
+        return {"available": False, "note": "최근 추월 순위 교환을 찾지 못했어요."}
+
+    # 같은 순간에 subject의 이전 순위로 내려간 차량을 방금 추월한 상대로 본다.
+    target = None
+    tolerance = timedelta(seconds=3)
+    for dn, rows in by_driver.items():
+        if dn == int(driver_number):
+            continue
+        prev = None
+        for when, pos in rows:
+            if when > event["time"] + tolerance:
+                break
+            if prev is not None and abs((when - event["time"]).total_seconds()) <= 3:
+                if prev[1] == event["after"] and pos == event["before"]:
+                    target = dn
+                    break
+            prev = (when, pos)
+        if target is not None:
+            break
+    if target is None:
+        return {"available": False, "note": "방금 추월한 상대 차량을 확인하지 못했어요."}
+
+    # Position swaps around a pit stop are classification changes, not proof of
+    # an on-track overtake.  Reject them instead of inventing a racing cause.
+    if any(
+        row.get("driver_number") in (int(driver_number), target)
+        and _dt(row.get("date")) is not None
+        and abs((_dt(row.get("date")) - event["time"]).total_seconds()) <= 30
+        for row in (pits or [])
+    ):
+        return {"available": False, "note": "피트 구간의 순위 변동이라 실제 트랙 추월로 단정할 수 없어요."}
+
+    event_time = event["time"]
+    event_iso = event_time.isoformat()
+    window_start = (event_time - timedelta(seconds=8)).isoformat()
+    (intervals, car_data, target_car_data, locations, subj_laps, target_laps,
+     subj_stints, target_stints, race_control, metadata) = await asyncio.gather(
+        openf1.get_intervals(session, driver_number),
+        openf1.get_car_data_window(session, driver_number, window_start, event_iso),
+        openf1.get_car_data_window(session, target, window_start, event_iso),
+        openf1.get_location_window(session, driver_number, window_start, event_iso),
+        openf1.get_laps(session, driver_number), openf1.get_laps(session, target),
+        openf1.get_stints(session, driver_number), openf1.get_stints(session, target),
+        openf1.get_race_control(session), openf1.get_session_metadata(session),
+    )
+
+    gaps: list[tuple[datetime, float]] = []
+    for row in intervals or []:
+        when = _dt(row.get("date"))
+        if when is None or not (event_time - timedelta(seconds=12) <= when < event_time):
+            continue
+        try:
+            gap = float(row.get("interval"))
+        except (TypeError, ValueError):
+            continue
+        if gap >= 0:
+            gaps.append((when, gap))
+    gaps.sort(key=lambda item: item[0])
+
+    drs_active = any(row.get("drs") in (10, 12, 14) for row in (car_data or []))
+    target_drs_active = any(row.get("drs") in (10, 12, 14) for row in (target_car_data or []))
+
+    def _number(value):
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
+
+    def _paired_speed_metrics(subject_rows, target_rows):
+        """Compare same-time telemetry only (<=0.5 s apart)."""
+        target_valid = [(row, _dt(row.get("date")), _number(row.get("speed")))
+                        for row in (target_rows or [])]
+        target_valid = [(row, when, speed) for row, when, speed in target_valid
+                        if when is not None and speed is not None]
+        pairs = []
+        for row in subject_rows or []:
+            when, speed = _dt(row.get("date")), _number(row.get("speed"))
+            if when is None or speed is None or not target_valid:
+                continue
+            target_row, target_when, target_speed = min(
+                target_valid, key=lambda item: abs((item[1] - when).total_seconds())
+            )
+            if abs((target_when - when).total_seconds()) <= 0.5:
+                pairs.append({
+                    "date": row.get("date"), "subject_speed": speed,
+                    "target_speed": target_speed, "delta": speed - target_speed,
+                    "subject_drs": row.get("drs") in (10, 12, 14),
+                    "target_drs": target_row.get("drs") in (10, 12, 14),
+                    "subject_throttle": _number(row.get("throttle")),
+                    "target_throttle": _number(target_row.get("throttle")),
+                    "subject_brake": bool(row.get("brake")),
+                    "target_brake": bool(target_row.get("brake")),
+                    "subject_gear": row.get("n_gear"), "target_gear": target_row.get("n_gear"),
+                })
+        if not pairs:
+            return {"sample_count": 0}
+        # The approach phase is best represented by samples where the subject is
+        # still accelerating/using DRS; braking samples can invert the comparison.
+        approach = [p for p in pairs if p["subject_drs"] and not p["subject_brake"]] or \
+                   [p for p in pairs if not p["subject_brake"]] or pairs
+        deltas = [p["delta"] for p in approach]
+        peak = max(approach, key=lambda p: p["subject_speed"])
+        return {
+            "sample_count": len(pairs), "approach_sample_count": len(approach),
+            "mean_advantage_kmh": round(sum(deltas) / len(deltas), 1),
+            "max_advantage_kmh": round(max(deltas), 1),
+            "subject_peak_speed_kmh": round(peak["subject_speed"]),
+            "target_speed_at_peak_kmh": round(peak["target_speed"]),
+            "subject_drs_active": any(p["subject_drs"] for p in pairs),
+            "target_drs_active": any(p["target_drs"] for p in pairs),
+        }
+
+    speed = _paired_speed_metrics(car_data, target_car_data)
+
+    def _recent_lap_pace(laps):
+        completed = []
+        for lap in laps or []:
+            start_at = _dt(lap.get("date_start"))
+            duration = _number(lap.get("lap_duration"))
+            if start_at is None or duration is None:
+                continue
+            if start_at + timedelta(seconds=duration) <= event_time and not lap.get("is_pit_out_lap"):
+                completed.append((int(lap.get("lap_number") or 0), duration))
+        recent = sorted(completed)[-3:]
+        if not recent:
+            return {"laps": [], "mean_seconds": None}
+        return {"laps": [lap for lap, _ in recent],
+                "mean_seconds": round(sum(duration for _, duration in recent) / len(recent), 3)}
+
+    subject_pace, target_pace = _recent_lap_pace(subj_laps), _recent_lap_pace(target_laps)
+    pace_delta = None
+    if subject_pace["mean_seconds"] is not None and target_pace["mean_seconds"] is not None:
+        pace_delta = round(target_pace["mean_seconds"] - subject_pace["mean_seconds"], 3)
+
+    # Track location: generic progress/sector plus conservative named zones for
+    # Suzuka.  These zones are broad; they describe where, not why the pass occurred.
+    track_progress = None
+    track_zone = None
+    sector = None
+    if locations:
+        try:
+            from ..ml import track_ref
+            ref = await track_ref.get_reference(session)
+            loc = max((row for row in locations if row.get("x") is not None and row.get("y") is not None),
+                      key=lambda row: row.get("date") or "", default=None)
+            if ref is not None and loc is not None:
+                track_progress = round(track_ref.project(ref, loc["x"], loc["y"]), 3)
+        except Exception:
+            logger.exception("추월 위치 투영 실패")
+    circuit = (metadata or {}).get("circuit_short_name")
+    if track_progress is not None:
+        sector = 1 if track_progress < 0.36 else (2 if track_progress < 0.72 else 3)
+        if str(circuit).lower() == "suzuka":
+            p = track_progress
+            if p >= 0.96 or p < 0.12:
+                track_zone = "메인 스트레이트"
+            elif p < 0.18:
+                track_zone = "1·2번 코너 진입 구간"
+            elif p < 0.34:
+                track_zone = "S 커브 구간"
+            elif p < 0.43:
+                track_zone = "덩롭 구간"
+            elif p < 0.52:
+                track_zone = "데그너 구간"
+            elif p < 0.61:
+                track_zone = "헤어핀 구간"
+            elif p < 0.75:
+                track_zone = "스푼 구간"
+            elif p < 0.90:
+                track_zone = "백 스트레이트·130R 구간"
+            else:
+                track_zone = "시케인 구간"
+
+    neutralized = []
+    for row in race_control or []:
+        when = _dt(row.get("date"))
+        if when is None or abs((when - event_time).total_seconds()) > 30:
+            continue
+        message = str(row.get("message") or "").upper()
+        if row.get("category") in ("SafetyCar", "Flag") and any(
+            word in message for word in ("YELLOW", "SAFETY", "RED FLAG", "VSC")
+        ):
+            neutralized.append(row.get("message") or row.get("category"))
+
+    def _tyre(laps, stints):
+        lap_no = max(
+            (int(row["lap_number"]) for row in (laps or [])
+             if row.get("lap_number") is not None
+             and (_dt(row.get("date_start")) or end) <= event_time),
+            default=None,
+        )
+        if lap_no is None:
+            return {"compound": None, "age_laps": None}
+        current = next((st for st in (stints or [])
+                        if st.get("lap_start") is not None
+                        and int(st["lap_start"]) <= lap_no
+                        and (st.get("lap_end") is None or lap_no <= int(st["lap_end"]))), None)
+        if current is None:
+            return {"compound": None, "age_laps": None}
+        age = lap_no - int(current["lap_start"]) + 1 + int(current.get("tyre_age_at_start") or 0)
+        return {"compound": current.get("compound"), "age_laps": age}
+
+    name_of = {int(row["driver_number"]): row.get("full_name") or row.get("name_acronym")
+               for row in (drivers or []) if row.get("driver_number") is not None}
+    evidence = []
+    if gaps:
+        evidence.append({"level": "CONFIRMED", "factor": "gap_closing",
+                         "detail": f"{round(gaps[0][1], 2)}s -> {round(gaps[-1][1], 2)}s"})
+    if speed.get("sample_count"):
+        evidence.append({"level": "CONFIRMED", "factor": "relative_speed",
+                         "detail": f"mean {speed.get('mean_advantage_kmh')} km/h"})
+    if drs_active:
+        evidence.append({"level": "CONFIRMED", "factor": "drs", "detail": "subject active"})
+    evidence.append({"level": "CONFIRMED" if not neutralized else "UNKNOWN",
+                     "factor": "race_control",
+                     "detail": "normal" if not neutralized else "; ".join(neutralized)})
+
+    return {
+        "available": True,
+        "subject_driver": int(driver_number),
+        "subject_name": name_of.get(int(driver_number)),
+        "target_driver": target,
+        "target_name": name_of.get(target),
+        "event_time": event_iso,
+        "gap_start_sec": round(gaps[0][1], 2) if gaps else None,
+        "gap_end_sec": round(gaps[-1][1], 2) if gaps else None,
+        "drs_active": drs_active,
+        "target_drs_active": target_drs_active,
+        "speed_comparison": speed,
+        "track": {"circuit": circuit, "progress": track_progress,
+                  "sector": sector, "zone": track_zone},
+        "recent_pace": {"subject": subject_pace, "target": target_pace,
+                        "subject_advantage_sec": pace_delta},
+        "race_control_clear": not neutralized,
+        "race_control_events": neutralized,
+        "subject_tyre": _tyre(subj_laps, subj_stints),
+        "target_tyre": _tyre(target_laps, target_stints),
+        "evidence": evidence,
+        "unsupported_causes": ["driver_error", "racing_line", "team_intent"],
     }
 
 

@@ -82,6 +82,118 @@ async def _race_has_started(session_key: int, cutoff: str | None) -> bool:
     return now >= start
 
 
+def _latest_positions(rows: list[dict], cutoff: str | None) -> dict[int, int]:
+    latest: dict[int, tuple[str, int]] = {}
+    for row in rows:
+        dn, date, position = row.get("driver_number"), row.get("date"), row.get("position")
+        if dn is None or not date or position is None or cutoff and date > cutoff:
+            continue
+        dn = int(dn)
+        if dn not in latest or date > latest[dn][0]:
+            latest[dn] = (date, int(position))
+    return {dn: value[1] for dn, value in latest.items()}
+
+
+async def _pit_blocked_drivers(
+    session_key: int,
+    cutoff: str | None,
+    candidates: list[dict],
+) -> set[int]:
+    """Return candidate/overtaken drivers affected by a pit-lane visit.
+
+    OpenF1 pit rows are timestamped at pit exit and include total pit-lane duration.
+    A small margin on both sides absorbs API timestamp jitter and out-lap position churn.
+    """
+    now = _parse_iso(cutoff)
+    if now is None or not candidates:
+        return set()
+    positions = _latest_positions(await openf1.get_positions(session_key), cutoff)
+    driver_at_position = {position: dn for dn, position in positions.items()}
+    watched: set[int] = set()
+    battle_pairs: dict[int, set[int]] = {}
+    for candidate in candidates:
+        dn = int(candidate["driver"])
+        watched.add(dn)
+        battle_pairs[dn] = {dn}
+        position = positions.get(dn)
+        if position is not None and position > 1:
+            ahead = driver_at_position.get(position - 1)
+            if ahead is not None:
+                watched.add(ahead)
+                battle_pairs[dn].add(ahead)
+
+    blocked: set[int] = set()
+    for row in await openf1.get_pit(session_key):
+        dn = row.get("driver_number")
+        exit_time = _parse_iso(row.get("date"))
+        if dn is None or exit_time is None or int(dn) not in watched:
+            continue
+        try:
+            duration = max(0.0, float(row.get("pit_duration") or 0.0))
+        except (TypeError, ValueError):
+            duration = 0.0
+        start = exit_time - timedelta(
+            seconds=duration + settings.watcher_pit_margin_before_sec
+        )
+        end = exit_time + timedelta(seconds=settings.watcher_pit_margin_after_sec)
+        if start <= now <= end:
+            blocked.add(int(dn))
+    return {
+        candidate_driver
+        for candidate_driver, pair in battle_pairs.items()
+        if pair & blocked
+    }
+
+
+async def _session_neutralization_reason(
+    session_key: int, cutoff: str | None
+) -> str | None:
+    """Block safety-car/VSC/red-flag periods and the unstable restart buffer."""
+    now = _parse_iso(cutoff)
+    if now is None:
+        return "unknown_time"
+    state: str | None = None
+    cleared_at: datetime | None = None
+    rows = sorted(
+        await openf1.get_race_control(session_key),
+        key=lambda row: str(row.get("date") or ""),
+    )
+    for row in rows:
+        at = _parse_iso(row.get("date"))
+        if at is None or at > now:
+            continue
+        text = " ".join(
+            str(row.get(key) or "")
+            for key in ("category", "flag", "message", "scope")
+        ).upper()
+        if "RED FLAG" in text or "RED" == str(row.get("flag") or "").upper():
+            state = "red_flag"
+            cleared_at = None
+        elif "VIRTUAL SAFETY CAR" in text or " VSC" in f" {text}":
+            if any(token in text for token in ("ENDING", "ENDED", "GREEN", "RESUME")):
+                state = None
+                cleared_at = at
+            else:
+                state = "virtual_safety_car"
+                cleared_at = None
+        elif "SAFETY CAR" in text:
+            if any(token in text for token in ("IN THIS LAP", "ENDING", "ENDED", "GREEN", "RESUME")):
+                state = None
+                cleared_at = at
+            elif "DEPLOY" in text or "TRACK" in text:
+                state = "safety_car"
+                cleared_at = None
+        elif any(token in text for token in ("GREEN FLAG", "RACE RESUMED", "TRACK CLEAR")):
+            if state is not None:
+                cleared_at = at
+            state = None
+    if state is not None:
+        return state
+    if cleared_at is not None and (now - cleared_at).total_seconds() < settings.watcher_restart_buffer_sec:
+        return "restart_buffer"
+    return None
+
+
 def _candidate_score(candidate: dict, future_gain: bool = False) -> float:
     """접전 후보의 설명력 점수.
 
@@ -112,6 +224,30 @@ def _candidate_score(candidate: dict, future_gain: bool = False) -> float:
     if future_gain and lead_value is not None and 0.0 < lead_value <= 45.0:
         lead_score = max(0.0, 1.0 - abs(lead_value - 25.0) / 25.0)
     return gain_score + battle_score + lead_score + gap_score + closing_score
+
+
+def _register_consecutive_hit(
+    hits: dict[tuple[int, str], tuple[int, datetime]],
+    driver_number: int,
+    reason: str,
+    cutoff: str | None,
+    max_gap_seconds: float,
+    minimum: int,
+) -> bool:
+    """Count only genuinely adjacent replay-time hits, never sparse spikes."""
+    at = _parse_iso(cutoff)
+    if at is None:
+        return False
+    key = (int(driver_number), reason)
+    previous = hits.get(key)
+    count = 1
+    if previous is not None:
+        previous_count, previous_at = previous
+        delta = (at - previous_at).total_seconds()
+        if 0.0 < delta <= max_gap_seconds:
+            count = previous_count + 1
+    hits[key] = (count, at)
+    return count >= max(1, int(minimum))
 
 
 def _latest_position_at(rows: list[dict], driver_number: int, at_time: datetime) -> int | None:
@@ -300,6 +436,7 @@ async def watch(
     last_cutoff_dt: datetime | None = None
     announced: dict[int, float] = {}   # driver -> 마지막 안내 시각(중복 방지)
     announced_events: set[tuple[int, int, int, int]] = set()
+    consecutive_hits: dict[tuple[int, str], tuple[int, datetime]] = {}
     logger.warning("[watcher] 예측형 능동 안내 시작 (threshold=%.2f, period=%.1fs)", threshold, period)
 
     def _debug(message: str, *args) -> None:
@@ -358,8 +495,36 @@ async def watch(
             _debug("[watcher-skip] t=%s reason=formation_or_pre_race", cutoff)
             continue
 
+        neutralization = await _session_neutralization_reason(int(session), cutoff)
+        if neutralization is not None:
+            consecutive_hits.clear()
+            _debug(
+                "[watcher-skip] t=%s reason=neutralized detail=%s",
+                cutoff,
+                neutralization,
+            )
+            continue
+
         try:
             candidates_info = await _battle_candidates(session, detection_cutoff)
+            pit_blocked = await _pit_blocked_drivers(
+                int(session), detection_cutoff, candidates_info
+            )
+            if pit_blocked:
+                candidates_info = [
+                    candidate for candidate in candidates_info
+                    if int(candidate["driver"]) not in pit_blocked
+                ]
+                for driver in pit_blocked:
+                    consecutive_hits.pop((driver, "ml"), None)
+                    consecutive_hits.pop((driver, "hybrid"), None)
+                    consecutive_hits.pop((driver, "fast_hybrid"), None)
+                    consecutive_hits.pop((driver, "replay_confirmed"), None)
+                _debug(
+                    "[watcher-skip] t=%s reason=pit_affected drivers=%s",
+                    cutoff,
+                    sorted(pit_blocked),
+                )
             # 실시간 gap 스트리밍: 매 주기 '가장 붙은' 드라이버의 현재 gap을 게이지로 내려보낸다.
             # (표시 전용 — Unity는 HUD가 떠 있고 driver가 일치할 때만 반영. 안내/쿨다운과 무관.)
             if update_gauge is not None and candidates_info:
@@ -394,6 +559,20 @@ async def watch(
             if confirmed_gains:
                 confirmed = confirmed_gains[0]
                 dn = confirmed["driver"]
+                if not _register_consecutive_hit(
+                    consecutive_hits,
+                    dn,
+                    "replay_confirmed",
+                    cutoff,
+                    max(5.0, playback_speed * period * 3.0),
+                    settings.watcher_min_consecutive_hits,
+                ):
+                    _debug(
+                        "[watcher-skip] t=%s driver=%s reason=awaiting_confirmation",
+                        cutoff,
+                        dn,
+                    )
+                    continue
                 event_key = (
                     int(session),
                     int(dn),
@@ -447,84 +626,6 @@ async def watch(
                     )
                 continue
 
-            hybrid_hits = [
-                c for c in candidates_info
-                if settings.watcher_hybrid_enabled
-                and c["gap"] <= settings.watcher_hybrid_gap_sec
-                and c["trend"] is not None
-                and c["trend"] <= settings.watcher_hybrid_closing_delta
-            ]
-            hybrid = max(
-                hybrid_hits,
-                key=lambda c: _candidate_score(c),
-                default=None,
-            )
-            if hybrid is not None:
-                dn = hybrid["driver"]
-                now = time.monotonic()
-                if now - last_fire >= cooldown and now - announced.get(dn, -1e9) >= cooldown * 2:
-                    if not _is_currently_playing():
-                        _debug("[watcher-skip] t=%s driver=%s reason=paused_before_emit", cutoff, dn)
-                        continue
-                    last_fire = now
-                    announced[dn] = now
-                    logger.warning(
-                        "[watcher-fire] t=%s driver=%s reason=gap_trend gap=%.3f trend=%.3f",
-                        cutoff,
-                        dn,
-                        hybrid["gap"],
-                        hybrid["trend"],
-                    )
-                    watcher_eval.log_prediction(session, cutoff, dn, settings.watcher_hybrid_min_probability)
-                    await announce(dn, settings.watcher_hybrid_min_probability, f"{dn}번, 곧 추월할 것 같아요!", gap_seconds=hybrid.get("gap"), gap_trend=hybrid.get("trend"))
-                else:
-                    _debug(
-                        "[watcher-skip] t=%s driver=%s reason=gap_trend_cooldown remaining_global=%.2f remaining_driver=%.2f gap=%.3f trend=%.3f",
-                        cutoff,
-                        dn,
-                        max(0.0, cooldown - (now - last_fire)),
-                        max(0.0, cooldown * 2 - (now - announced.get(dn, -1e9))),
-                        hybrid["gap"],
-                        hybrid["trend"],
-                    )
-                continue
-
-            if (
-                settings.watcher_fast_hybrid_enabled
-                and elapsed is not None
-                and elapsed >= settings.watcher_fast_min_elapsed_sec
-            ):
-                fast_hits = [
-                    c for c in candidates_info
-                    if c["gap"] <= settings.watcher_fast_gap_sec
-                    and c["trend"] is not None
-                    and c["trend"] <= settings.watcher_fast_closing_delta
-                ]
-                fast = min(
-                    fast_hits,
-                    key=lambda c: (c["gap"], c["trend"]),
-                    default=None,
-                )
-                if fast is not None:
-                    dn = fast["driver"]
-                    now = time.monotonic()
-                    if now - last_fire >= cooldown and now - announced.get(dn, -1e9) >= cooldown * 2:
-                        if not _is_currently_playing():
-                            _debug("[watcher-skip] t=%s driver=%s reason=paused_before_emit", cutoff, dn)
-                            continue
-                        last_fire = now
-                        announced[dn] = now
-                        logger.warning(
-                            "[watcher-fire] t=%s driver=%s reason=fast_hybrid gap=%.3f trend=%.3f",
-                            cutoff,
-                            dn,
-                            fast["gap"],
-                            fast["trend"],
-                        )
-                        watcher_eval.log_prediction(session, cutoff, dn, settings.watcher_threshold)
-                        await announce(dn, settings.watcher_threshold, f"{dn}번, 곧 추월할 것 같아요!", gap_seconds=fast.get("gap"), gap_trend=fast.get("trend"))
-                    continue
-
             candidates = [c["driver"] for c in candidates_info]
             best: tuple[int, float, float, str] | None = None
             for dn in candidates:
@@ -541,7 +642,7 @@ async def watch(
                     _debug("[watcher-skip] t=%s driver=%s reason=opening_gap trend=%.3f", cutoff, dn, gap_trend)
                     continue
                 prob = _pred.predict(feats).get("overtake_probability", 0.0) or 0.0
-                set_driver_prob(session, dn, prob)   # (C) explain_situation이 즉시 읽도록 (세션별) 캐시
+                set_driver_prob(session, dn, prob, detection_cutoff)  # 수동 질문도 동일 시점 결과 재사용
                 gap = feats.get("gap_ahead")
                 hybrid_hit = (
                     settings.watcher_hybrid_enabled
@@ -551,9 +652,19 @@ async def watch(
                     and gap_trend <= settings.watcher_hybrid_closing_delta
                     and prob >= settings.watcher_hybrid_min_probability
                 )
-                reason = "ml" if prob >= threshold else "hybrid"
-                score = prob if prob >= threshold else (prob + 0.2 if hybrid_hit else prob)
-                if (prob >= threshold or hybrid_hit) and (best is None or score > best[1]):
+                fast_hit = (
+                    settings.watcher_fast_hybrid_enabled
+                    and elapsed is not None
+                    and elapsed >= settings.watcher_fast_min_elapsed_sec
+                    and gap is not None
+                    and gap <= settings.watcher_fast_gap_sec
+                    and gap_trend is not None
+                    and gap_trend <= settings.watcher_fast_closing_delta
+                    and prob >= settings.watcher_hybrid_min_probability
+                )
+                reason = "ml" if prob >= threshold else ("fast_hybrid" if fast_hit else "hybrid")
+                score = prob if prob >= threshold else (prob + 0.2 if (hybrid_hit or fast_hit) else prob)
+                if (prob >= threshold or hybrid_hit or fast_hit) and (best is None or score > best[1]):
                     best = (dn, score, prob, reason)
                 else:
                     _debug(
@@ -570,6 +681,21 @@ async def watch(
                 continue
 
             dn, _score, prob, reason = best
+            if not _register_consecutive_hit(
+                consecutive_hits,
+                dn,
+                reason,
+                cutoff,
+                max(5.0, playback_speed * period * 3.0),
+                settings.watcher_min_consecutive_hits,
+            ):
+                _debug(
+                    "[watcher-skip] t=%s driver=%s reason=awaiting_confirmation prob=%.3f",
+                    cutoff,
+                    dn,
+                    prob,
+                )
+                continue
             now = time.monotonic()
             if now - last_fire < cooldown:                     # 전체 쿨다운
                 _debug(

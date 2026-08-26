@@ -37,10 +37,18 @@ async def lifespan(app: FastAPI):
     """
     if settings.warmup_on_start:
         try:
-            logger.info("워밍업: STT/TTS 모델 미리 로드 중…")
+            logger.info("워밍업: STT/TTS/ML/트랙 기준선 미리 로드 중…")
             if settings.tts_enabled:
                 audio = await tts.synthesize("안녕하세요.")
                 await stt.transcribe(audio, language="ko")  # TTS 결과로 STT까지 예열
+            # 첫 추월 질문에서 LightGBM 로드와 트랙 기준선 구축까지 겹치면 10초 이상
+            # 걸릴 수 있다. 데모 기본 세션 자산은 서버 시작 전에 준비한다.
+            from .ml.predict import model_info
+            from .ml import track_ref
+            await asyncio.gather(
+                asyncio.to_thread(model_info),
+                track_ref.get_reference(settings.default_session_key),
+            )
             logger.info("워밍업 완료 — 이제 요청이 빠릅니다.")
         except Exception:
             logger.exception("워밍업 실패(무시하고 계속 — 첫 요청에서 로드됨)")
@@ -56,6 +64,14 @@ MAX_HISTORY_TURNS = 8
 @app.get("/health")
 def health():
     return {"status": "ok"}
+
+
+@app.get("/health/ml")
+def ml_health():
+    """Expose the exact deployed inference contract; loading also validates it."""
+    from .ml.predict import model_info
+
+    return {"status": "ok", "model": model_info()}
 
 
 async def _transcribe_safe(data_b64: str) -> str | None:
@@ -226,7 +242,7 @@ async def ws(websocket: WebSocket):
         probability(0~1)는 Unity가 리본 강도로 사용한다.
         """
         if event:
-            set_recent_overtake(event)
+            set_recent_overtake(event, session_key=session_key)
         await send({
             "type": "command", "name": "predictOvertake",
             "args": {

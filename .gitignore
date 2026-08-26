@@ -225,5 +225,12 @@ __marimo__/
 # watcher 오탐 평가 로그
 logs/
 
+# Codex 문서 렌더링·시각 검수 임시 산출물
+.codex_artifacts/
+
 # FUSE 마운트 임시 잔재(열린 파일 덮어쓰기 시 생김)
 .fuse_hidden*
+
+# Local agent/tooling artifacts
+.claude/
+.codex_portfolio_model_update.py

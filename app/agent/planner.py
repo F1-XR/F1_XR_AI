@@ -83,7 +83,7 @@ def build_command_plan(text: str, selected_driver: int | None = None) -> list[Pl
 
     # 설명·질문형(상황/전략/왜/추월 가능성 등)은 결정적 라우터가 가로채지 말고 LLM 도구에 맡긴다.
     # (explain_situation·explain_why·predict_overtake가 처리해야 하는데 highlight로 새는 것 방지)
-    _ASK = ("전략", "상황", "왜", "설명", "어때", "추월할", "추월가능", "추월확률", "추월할까", "가능성", "무슨전략")
+    _ASK = ("전략", "상황", "왜", "어떻게", "이유", "설명", "어때", "추월할", "추월가능", "추월확률", "추월할까", "가능성", "무슨전략")
     _CMD = ("장면", "돌아", "직전", "천천히", "느리게", "멈춰", "정지", "드론", "강조")
     if any(k in t for k in _ASK) and not any(k in t for k in _CMD):
         return []

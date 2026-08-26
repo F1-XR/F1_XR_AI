@@ -6,3 +6,4 @@
 
 faster-whisper>=1.0                                    # STT
 git+https://github.com/myshell-ai/MeloTTS.git          # TTS (PyPI 아님, GitHub)
+setuptools<81                                           # MeloTTS/librosa의 pkg_resources 호환

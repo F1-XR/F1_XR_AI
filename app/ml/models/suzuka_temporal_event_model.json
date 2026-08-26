@@ -1,0 +1,35 @@
+{
+  "model_bundle_version": "suzuka-demo-e-2026-08-24",
+  "model_file": "suzuka_temporal_event_label_overtake.txt",
+  "base_model_file": "suzuka_temporal_event_base_label_overtake.txt",
+  "feature_schema_version": "event_type_v1_26",
+  "temporal_feature_schema_version": "temporal_v1_19",
+  "time_unit": "seconds",
+  "training_year": 2024,
+  "training_circuits": [
+    "Austin",
+    "Hungaroring",
+    "Jeddah",
+    "Melbourne",
+    "Spa-Francorchamps",
+    "Suzuka"
+  ],
+  "held_out_evaluation": "2025 Suzuka",
+  "selection_required_event": "Hamilton P8-to-P7",
+  "selection_raw_threshold": 0.6,
+  "selection_result": {
+    "detected_events": 31,
+    "actual_events": 35,
+    "false_alert_episodes_before_runtime_gates": 102,
+    "hamilton_8_to_7_detected": true
+  },
+  "runtime_guards": [
+    "official_lap_1_start",
+    "pit_window",
+    "safety_car",
+    "virtual_safety_car",
+    "red_flag",
+    "restart_buffer",
+    "consecutive_hits"
+  ]
+}

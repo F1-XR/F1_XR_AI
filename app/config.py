@@ -39,7 +39,7 @@ class Settings(BaseSettings):
     # 음성 공급자 — .env 의 STT_PROVIDER/TTS_PROVIDER 로 교체(모델 교체 시 여기만 바꿈)
     stt_provider: str = "whisper"    # whisper | voxtral
     tts_provider: str = "qwen3"    # melotts | qwen3 | cosyvoice2 | elevenlabs
-    stt_model: str = "large-v3-turbo"   # faster-whisper 모델 (large-v3-turbo | small | base)
+    stt_model: str = "small"   # 짧은 한국어 데모 명령: CPU large-v3-turbo보다 약 3.5배 빠름
 
     # Qwen3-TTS 전용 (tts_provider=qwen3 일 때만 사용)
     qwen_tts_model: str = "Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice"
@@ -63,6 +63,12 @@ class Settings(BaseSettings):
     watcher_threshold: float = 0.3     # 이 확률 이상이면 안내(0~1)
     watcher_period_sec: float = 0.5    # 감시 주기(초)
     watcher_cooldown_sec: float = 10.0 # 연속 안내 최소 간격(초)
+    # 한 번 튄 확률로 알리지 않고 같은 차량이 연속 N회 조건을 만족해야 안내한다.
+    watcher_min_consecutive_hits: int = 2
+    # 피트 진입 전/출차 후와 경기 중립화 해제 직후에는 순위·갭이 불안정하므로 차단한다.
+    watcher_pit_margin_before_sec: float = 5.0
+    watcher_pit_margin_after_sec: float = 8.0
+    watcher_restart_buffer_sec: float = 12.0
     # 포메이션 랩은 watcher가 공식 Lap 1 시작시각으로 별도 완전 차단한다.
     # 실제 레이스는 Lap 1부터 측정한다.
     watcher_ignore_lap1: bool = False
@@ -73,7 +79,8 @@ class Settings(BaseSettings):
     watcher_hybrid_enabled: bool = False # ML 점수 + gap/closing 도메인 신호 결합
     watcher_hybrid_gap_sec: float = 0.85
     watcher_hybrid_closing_delta: float = -0.05
-    watcher_hybrid_min_probability: float = 0.05
+    # 하이브리드도 실제 ML 확률이 이 값 이상이어야 한다. gap 규칙만으로 "곧 추월" 금지.
+    watcher_hybrid_min_probability: float = 0.25
     watcher_fast_hybrid_enabled: bool = False
     watcher_fast_gap_sec: float = 0.15
     watcher_fast_closing_delta: float = -0.1

@@ -41,7 +41,20 @@ class WhisperTurboSTT(STTProvider):
 
         def _run() -> str:
             # faster-whisper는 파일 경로/파일객체/numpy를 받는다 → wav 바이트를 BytesIO로 감싼다.
-            segments, _info = self._model.transcribe(io.BytesIO(audio), language=language)
+            # 데모 발화는 1~2초짜리 짧은 명령이다. 기본 beam search(여러 후보 탐색)는
+            # CPU에서 수 초를 추가하므로 greedy 1개만 사용한다. VAD로 앞뒤 무음을
+            # 제거하고 이전 발화 문맥/타임스탬프 계산도 꺼 실시간 입력 지연을 줄인다.
+            segments, _info = self._model.transcribe(
+                io.BytesIO(audio),
+                language=language,
+                beam_size=1,
+                best_of=1,
+                temperature=0.0,
+                vad_filter=True,
+                vad_parameters={"min_silence_duration_ms": 250},
+                condition_on_previous_text=False,
+                without_timestamps=True,
+            )
             return "".join(seg.text for seg in segments).strip()
 
         # transcribe는 동기(블로킹) → 이벤트 루프를 막지 않게 스레드에서 실행.
